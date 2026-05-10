@@ -1,7 +1,8 @@
 """Event models emitted by the DSD-FME log parser.
 
-Pydantic models with a discriminated union over `type` so callers can
-match on `event.type` without isinstance() chains.
+Phase 1A: Capacity Plus control-channel events. The control channel does not
+expose per-call SRC IDs or GPS — those live on payload channels and will be
+added in Phase 1B (voice_start, lrrp, ars, encryption).
 """
 from __future__ import annotations
 
@@ -13,12 +14,19 @@ from pydantic import BaseModel, Field
 
 
 class EventType(str, Enum):
-    VOICE_START = "voice_start"
-    VOICE_END = "voice_end"
-    LRRP = "lrrp"
-    ARS = "ars"
-    CSBK = "csbk"
-    ENCRYPTION = "encryption"
+    SITE_INFO = "site_info"
+    CHANNEL_STATUS = "channel_status"
+    LSN_STATUS = "lsn_status"
+    BANK_CALL = "bank_call"
+    QUALITY = "quality"
+
+
+class LSNState(BaseModel):
+    """One slot inside an LSN status snapshot. `tg` is set when state == 'Active'."""
+
+    lsn: int
+    state: str  # "Idle" | "Rest" | "Active"
+    tg: Optional[int] = None
 
 
 class _BaseEvent(BaseModel):
@@ -26,51 +34,60 @@ class _BaseEvent(BaseModel):
     raw_line: str
 
 
-class VoiceCallEvent(_BaseEvent):
-    type: Literal[EventType.VOICE_START] = EventType.VOICE_START
-    src_id: int
-    tgt_id: int
-    slot: int
-    encrypted: bool = False
+class SiteInfoEvent(_BaseEvent):
+    """Parsed from `SLCO Capacity Plus Site: N - Rest LSN: M - RS: XX`."""
+
+    type: Literal[EventType.SITE_INFO] = EventType.SITE_INFO
+    site: int
+    rest_lsn: int
+    rs: str  # kept as string because RS appears as "00" in logs
 
 
-class VoiceEndEvent(_BaseEvent):
-    type: Literal[EventType.VOICE_END] = EventType.VOICE_END
-    slot: int
+class ChannelStatusEvent(_BaseEvent):
+    """Parsed from `Capacity Plus Channel Status - FL: X TS: Y RS: Z - Rest LSN: N - <Block>`."""
+
+    type: Literal[EventType.CHANNEL_STATUS] = EventType.CHANNEL_STATUS
+    fl: int
+    ts: int
+    rs: int
+    rest_lsn: int
+    block_type: str  # "Single" | "Initial" | "Final"
 
 
-class LRRPEvent(_BaseEvent):
-    type: Literal[EventType.LRRP] = EventType.LRRP
-    src_id: int
-    lat: float
-    lon: float
+class LSNStatusEvent(_BaseEvent):
+    """A single status snapshot line covering 4 LSNs (one bank: 1-4 or 5-8)."""
+
+    type: Literal[EventType.LSN_STATUS] = EventType.LSN_STATUS
+    states: list[LSNState]
 
 
-class ARSEvent(_BaseEvent):
-    type: Literal[EventType.ARS] = EventType.ARS
-    src_id: int
-    registered: bool
+class BankCallEvent(_BaseEvent):
+    """Parsed from `Bank <One|Two> <hex> <description> Call(s) - LSN N: TGT X; ...`.
+
+    `lsn_to_tg` is the active LSN -> Talkgroup mapping announced for this bank.
+    """
+
+    type: Literal[EventType.BANK_CALL] = EventType.BANK_CALL
+    bank: str  # "One" | "Two"
+    flag_byte: str
+    description: str
+    lsn_to_tg: dict[int, int]
 
 
-class CSBKEvent(_BaseEvent):
-    type: Literal[EventType.CSBK] = EventType.CSBK
-    src_id: Optional[int] = None
+class QualityEvent(_BaseEvent):
+    """Decode quality issue (CRC / FEC error). Useful for SNR/health indicator."""
 
-
-class EncryptionEvent(_BaseEvent):
-    type: Literal[EventType.ENCRYPTION] = EventType.ENCRYPTION
-    src_id: Optional[int] = None
-    alg_id: Optional[str] = None
+    type: Literal[EventType.QUALITY] = EventType.QUALITY
+    error_type: str  # "CSBK_CRC" | "SLCO_CRC" | "CACH_BURST_FEC"
 
 
 Event = Annotated[
     Union[
-        VoiceCallEvent,
-        VoiceEndEvent,
-        LRRPEvent,
-        ARSEvent,
-        CSBKEvent,
-        EncryptionEvent,
+        SiteInfoEvent,
+        ChannelStatusEvent,
+        LSNStatusEvent,
+        BankCallEvent,
+        QualityEvent,
     ],
     Field(discriminator="type"),
 ]
