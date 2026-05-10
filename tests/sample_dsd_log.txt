@@ -1,0 +1,9 @@
+# Placeholder for a real DSD-FME stderr capture from the Cap+ network.
+# Replace this file with the output of the following command, run on the Pi
+# during ~5 minutes of active traffic:
+#
+#   dsd-fme -i pulse:dmr_capture.monitor -o /tmp/audio_test.wav -fs \
+#       2> tests/sample_dsd_log.txt
+#
+# Once the real capture lands here, re-run pytest and tighten the parser
+# regexes against any unmatched lines.
