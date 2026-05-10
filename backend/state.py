@@ -206,6 +206,11 @@ class StateManager:
     # --- per-event handlers ---
 
     def _on_voice_call(self, ev: VoiceCallEvent) -> None:
+        # SRC=0 is the DSD-FME placeholder emitted before the embedded LC is
+        # decoded — it does not correspond to a real radio. Skip it so we
+        # don't accumulate a phantom "radio 0" with hundreds of frames.
+        if ev.src == 0:
+            return
         radio = self._touch_radio(ev.src, ev.timestamp)
         radio.voice_frame_count += 1
         radio.last_tg = ev.tgt
