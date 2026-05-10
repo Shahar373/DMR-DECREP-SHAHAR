@@ -1,8 +1,10 @@
 """Event models emitted by the DSD-FME log parser.
 
-Phase 1A: Capacity Plus control-channel events. The control channel does not
-expose per-call SRC IDs or GPS — those live on payload channels and will be
-added in Phase 1B (voice_start, lrrp, ars, encryption).
+Phase 1A: Capacity Plus control-channel events (site, channel status, LSN
+status, bank announcements, quality).
+
+Phase 1B: payload-channel events (voice calls with SRC, preamble CSBKs, data
+headers, IP mappings, LRRP positions/requests, encryption indicators).
 """
 from __future__ import annotations
 
@@ -14,11 +16,20 @@ from pydantic import BaseModel, Field
 
 
 class EventType(str, Enum):
+    # Phase 1A — control channel
     SITE_INFO = "site_info"
     CHANNEL_STATUS = "channel_status"
     LSN_STATUS = "lsn_status"
     BANK_CALL = "bank_call"
     QUALITY = "quality"
+    # Phase 1B — payload channel
+    VOICE_CALL = "voice_call"
+    PREAMBLE_CSBK = "preamble_csbk"
+    DATA_HEADER = "data_header"
+    IP_MAPPING = "ip_mapping"
+    LRRP_POSITION = "lrrp_position"
+    LRRP_REQUEST = "lrrp_request"
+    ENCRYPTION = "encryption"
 
 
 class LSNState(BaseModel):
@@ -34,18 +45,16 @@ class _BaseEvent(BaseModel):
     raw_line: str
 
 
-class SiteInfoEvent(_BaseEvent):
-    """Parsed from `SLCO Capacity Plus Site: N - Rest LSN: M - RS: XX`."""
+# --- Phase 1A: control channel ---
 
+class SiteInfoEvent(_BaseEvent):
     type: Literal[EventType.SITE_INFO] = EventType.SITE_INFO
     site: int
     rest_lsn: int
-    rs: str  # kept as string because RS appears as "00" in logs
+    rs: str
 
 
 class ChannelStatusEvent(_BaseEvent):
-    """Parsed from `Capacity Plus Channel Status - FL: X TS: Y RS: Z - Rest LSN: N - <Block>`."""
-
     type: Literal[EventType.CHANNEL_STATUS] = EventType.CHANNEL_STATUS
     fl: int
     ts: int
@@ -55,18 +64,11 @@ class ChannelStatusEvent(_BaseEvent):
 
 
 class LSNStatusEvent(_BaseEvent):
-    """A single status snapshot line covering 4 LSNs (one bank: 1-4 or 5-8)."""
-
     type: Literal[EventType.LSN_STATUS] = EventType.LSN_STATUS
     states: list[LSNState]
 
 
 class BankCallEvent(_BaseEvent):
-    """Parsed from `Bank <One|Two> <hex> <description> Call(s) - LSN N: TGT X; ...`.
-
-    `lsn_to_tg` is the active LSN -> Talkgroup mapping announced for this bank.
-    """
-
     type: Literal[EventType.BANK_CALL] = EventType.BANK_CALL
     bank: str  # "One" | "Two"
     flag_byte: str
@@ -75,10 +77,90 @@ class BankCallEvent(_BaseEvent):
 
 
 class QualityEvent(_BaseEvent):
-    """Decode quality issue (CRC / FEC error). Useful for SNR/health indicator."""
-
     type: Literal[EventType.QUALITY] = EventType.QUALITY
     error_type: str  # "CSBK_CRC" | "SLCO_CRC" | "CACH_BURST_FEC"
+
+
+# --- Phase 1B: payload channel ---
+
+class VoiceCallEvent(_BaseEvent):
+    """A voice burst seen on a payload slot. Carries the actual SRC radio id."""
+
+    type: Literal[EventType.VOICE_CALL] = EventType.VOICE_CALL
+    slot: int  # 1 or 2
+    src: int  # source radio id
+    tgt: int  # target talkgroup or radio id
+    is_cap_plus: bool = False  # "Cap+ Group Call" flavor
+    is_txi: bool = False  # "Group TXI Call" (transmit interrupt)
+    rest_lsn: Optional[int] = None  # only on Cap+ flavor
+
+
+class PreambleCSBKEvent(_BaseEvent):
+    """CC announcement preceding a data/voice/CSBK transaction."""
+
+    type: Literal[EventType.PREAMBLE_CSBK] = EventType.PREAMBLE_CSBK
+    addressing: str  # "Individual" | "Group"
+    kind: str  # "Data" | "CSBK" | "Voice"
+    src: int
+    tgt: int
+    rest_lsn: Optional[int] = None
+
+
+class DataHeaderEvent(_BaseEvent):
+    """Header of a data packet on a payload slot (precedes the body)."""
+
+    type: Literal[EventType.DATA_HEADER] = EventType.DATA_HEADER
+    slot: int
+    addressing: str  # "Indiv" | "Group"
+    delivery: str  # "Unconfirmed Delivery" | "Confirmed Delivery" | "Response Packet"
+    response_requested: bool = False
+    src: int
+    tgt: int
+
+
+class IPMappingEvent(_BaseEvent):
+    """Radio id ↔ IP/port seen on a data packet routing header.
+
+    Useful for the device table: each radio has a deterministic IP from the
+    Motorola data-revert scheme.
+    """
+
+    type: Literal[EventType.IP_MAPPING] = EventType.IP_MAPPING
+    role: str  # "SRC" | "DST"
+    radio_id: int
+    ip: str
+    port: int
+
+
+class LRRPPositionEvent(_BaseEvent):
+    """GPS position decoded from an LRRP packet body.
+
+    `src` is the reporting radio id — stitched from the most recent SRC(24)
+    line in the same data packet. May be None if context was lost.
+    """
+
+    type: Literal[EventType.LRRP_POSITION] = EventType.LRRP_POSITION
+    src: Optional[int]
+    lat: float
+    lon: float
+
+
+class LRRPRequestEvent(_BaseEvent):
+    """LRRP control message (request for / response with a position)."""
+
+    type: Literal[EventType.LRRP_REQUEST] = EventType.LRRP_REQUEST
+    src: int
+    tgt: int
+    direction: str  # "Request" | "Response"
+
+
+class EncryptionEvent(_BaseEvent):
+    """Encrypted Link Control seen on a payload slot (voice is not decodable)."""
+
+    type: Literal[EventType.ENCRYPTION] = EventType.ENCRYPTION
+    slot: int
+    flco: str  # e.g. "0x04"
+    fid: str  # e.g. "0x80"
 
 
 Event = Annotated[
@@ -88,6 +170,13 @@ Event = Annotated[
         LSNStatusEvent,
         BankCallEvent,
         QualityEvent,
+        VoiceCallEvent,
+        PreambleCSBKEvent,
+        DataHeaderEvent,
+        IPMappingEvent,
+        LRRPPositionEvent,
+        LRRPRequestEvent,
+        EncryptionEvent,
     ],
     Field(discriminator="type"),
 ]

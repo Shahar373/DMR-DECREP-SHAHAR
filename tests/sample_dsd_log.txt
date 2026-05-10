@@ -1,17 +1,20 @@
-# Real DSD-FME stderr capture from a Capacity Plus control channel (Site 2).
-# Captured 2026-05-10 on Raspberry Pi 5 + RSP1B at:
-#   168.863 MHz (rest LSN 6 at the time)
-#   168.500 MHz (rest LSN 3 at the time)
-# Both frequencies were observed acting as Cap+ control/rest channel (the rest
-# channel rotates among LSNs in Cap+).
+# Real DSD-FME stderr captures. This file is the regression corpus.
 #
-# This file is the regression corpus for the parser. To extend it after a
-# payload-channel capture (Phase 1B), append new representative lines below.
+# Sources:
+#   - Site 2 control channel @ 168.500 / 168.863 MHz (Cap+ rest channels)
+#   - Site 2 payload channels @ 168.x MHz, captured 2026-05-09 with traffic
+#     including LRRP position reports from radios 68, 74, 199, 215, 223, 2102.
+# Comment lines (#) are skipped by the regression test runner.
+
+# ============================================================================
+# Phase 1A — control channel
+# ============================================================================
 
 # ---- Sync lines (timestamp source; may carry quality flags) ----
 20:56:22 Sync: +DMR   slot1  [slot2] | CACH/Burst FEC ERR
 20:56:22 Sync: +DMR  [slot1]  slot2  | Color Code=02 | CSBK
 20:56:22 Sync: +DMR  [slot1]  slot2  | Color Code=02 | CSBK (CRC ERR)
+21:31:38 Sync: +DMR  [slot1]  slot2  | Color Code=02 | CSBK (FEC ERR)
 21:04:17 Sync: +DMR   slot1  [slot2] | Color Code=02 | CSBK
 
 # ---- Channel Status header lines ----
@@ -27,7 +30,6 @@
   LSN 01:  Idle;  LSN 02:  Idle;  LSN 03:  Rest;  LSN 04:  Idle;
   LSN 05:  Idle;  LSN 06:  Rest;  LSN 07:  Idle;  LSN 08:  Idle;
   LSN 05:   215;  LSN 06: 64250;  LSN 07:  Idle;  LSN 08:  Idle;
-  LSN 05:   215;  LSN 06:  Idle;  LSN 07:  Idle;  LSN 08:  Idle;
 
 # ---- SLCO site identification ----
  SLCO Capacity Plus Site: 2 - Rest LSN: 6 - RS: 00
@@ -35,3 +37,44 @@
 
 # ---- Standalone quality errors ----
  SLCO CRC ERR
+
+# ============================================================================
+# Phase 1B — payload channel
+# ============================================================================
+
+# ---- Voice calls (group, group+TXI, Cap+ flavors) ----
+ SLOT 2 TGT=1 SRC=2102 Group Call
+ SLOT 2 TGT=1 SRC=223 Group TXI Call
+ SLOT 2 TGT=1 SRC=0 Cap+ Group Call  Rest LSN: 5
+ SLOT 2 TGT=1 SRC=2102 Cap+ Group TXI Call  Rest LSN: 5
+ SLOT 2 TGT=2102 SRC=64250 Group Call
+
+# ---- Preamble CSBK announcing upcoming data/voice ----
+ Preamble CSBK - Individual Data - Source: 199 - Target: 64250 - Rest LSN: 6
+ Preamble CSBK - Individual CSBK - Source: 64250 - Target: 2102 - Rest LSN: 5
+ Preamble CSBK - Individual Data - Source: 199 - Target: 64250
+
+# ---- Data headers on payload slots ----
+ Slot 1 Data Header - Indiv - Unconfirmed Delivery - Source: 199 Target: 64250
+ Slot 1 Data Header - Indiv - Confirmed Delivery - Response Requested - Source: 199 Target: 64250
+ Slot 1 Data Header - Indiv - Response Packet - Source: 64250 Target: 199
+
+# ---- Radio id <-> IP mappings (Motorola data-revert) ----
+ SRC(24): 00000068; IP: 012.000.000.068; Port: 4001;
+ DST(24): 00064250; IP: 013.000.250.250; Port: 4001;
+
+# ---- LRRP GPS positions (preceded by SRC(24) for radio-id binding) ----
+ SRC(24): 00000068; IP: 012.000.000.068; Port: 4001;
+ DST(24): 00064250; IP: 013.000.250.250; Port: 4001;
+ Lat: 32.10128 Lon: 34.87151 (32.10128, 34.87151)
+
+# ---- LRRP request / response control ----
+ LRRP SRC: 199; Request from TGT: 64250;
+ LRRP SRC: 199; Response to TGT: 64250;
+
+# ---- Encrypted Link Control (voice undecodable when present) ----
+ SLOT 1 Protected LC  FLCO=0x04 FID=0x80
+ SLOT 1 Protected LC  FLCO=0x22 FID=0x80
+
+# NCurses-polluted variants (raw \x1b escapes) are exercised directly from
+# tests/test_parser.py since they can't be represented cleanly in a text file.
