@@ -338,7 +338,10 @@ function renderRadios(snap) {
     let va = a[sortCol], vb = b[sortCol];
     if (va == null) va = '';
     if (vb == null) vb = '';
-    if (sortCol === 'last_seen' || sortCol === 'id' || sortCol === 'voice_frame_count'
+    if (sortCol === 'last_seen') {
+      va = va ? new Date(va).getTime() : 0;
+      vb = vb ? new Date(vb).getTime() : 0;
+    } else if (sortCol === 'id' || sortCol === 'voice_frame_count'
         || sortCol === 'last_tg' || sortCol === 'last_slot') {
       va = Number(va) || 0;
       vb = Number(vb) || 0;
@@ -407,6 +410,7 @@ function render(snap) {
 const connEl = document.getElementById('conn');
 let ws = null;
 let reconnectDelay = 1000;
+let _lastWsMsgAt = 0;
 
 function connect() {
   const proto = location.protocol === 'https:' ? 'wss' : 'ws';
@@ -419,6 +423,7 @@ function connect() {
   };
 
   ws.onmessage = e => {
+    _lastWsMsgAt = Date.now();
     try { render(JSON.parse(e.data)); } catch (_) {}
   };
 
@@ -433,6 +438,16 @@ function connect() {
 }
 
 connect();
+
+// HTTP polling fallback — keeps the UI live if the WS push pipeline stalls.
+async function _pollFallback() {
+  if (Date.now() - _lastWsMsgAt < 1500) return;  // WS is delivering — skip
+  try {
+    const r = await fetch('/api/snapshot');
+    if (r.ok) render(await r.json());
+  } catch (_) {}
+}
+setInterval(_pollFallback, 2000);
 
 // Keep the map from going stale when window is resized.
 window.addEventListener('resize', () => map.invalidateSize());
