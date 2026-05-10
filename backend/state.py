@@ -171,7 +171,7 @@ class StateManager:
             active_calls=dict(self.active_calls),
             system=self.system,
             quality=self.quality,
-            generated_at=self._last_event_at or datetime.utcnow(),
+            generated_at=self._last_event_at or datetime.now(),
         )
 
     def active_talkgroups(self) -> dict[int, int]:

@@ -41,7 +41,7 @@ class LSNState(BaseModel):
 
 
 class _BaseEvent(BaseModel):
-    timestamp: datetime = Field(default_factory=datetime.utcnow)
+    timestamp: datetime = Field(default_factory=lambda: datetime.now())
     raw_line: str
 
 

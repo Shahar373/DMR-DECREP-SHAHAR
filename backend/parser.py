@@ -199,10 +199,11 @@ class DSDLogParser:
 
     def _update_timestamp(self, m: re.Match[str]) -> None:
         h, mi, s = int(m.group("h")), int(m.group("m")), int(m.group("s"))
-        self._last_timestamp = datetime.combine(datetime.utcnow().date(), time(h, mi, s))
+        # Log lines carry only HH:MM:SS; combine with today's local date.
+        self._last_timestamp = datetime.combine(datetime.now().date(), time(h, mi, s))
 
     def _now(self) -> datetime:
-        return self._last_timestamp or datetime.utcnow()
+        return self._last_timestamp or datetime.now()
 
     # --- Phase 1A handlers ---
 
