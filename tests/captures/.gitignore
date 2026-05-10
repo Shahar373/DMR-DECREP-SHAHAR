@@ -1,0 +1,6 @@
+# Ignore everything by default to keep large local captures out of the repo,
+# then whitelist the representative *_sample.log files and the docs.
+*
+!.gitignore
+!README.md
+!*_sample.log
