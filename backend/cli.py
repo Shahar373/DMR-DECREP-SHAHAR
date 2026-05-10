@@ -1,19 +1,16 @@
-"""DMR Cap+ live monitor — Phase 3 CLI beta.
+"""DMR Cap+ live monitor — Phase 4a CLI.
 
 Two modes:
 
-  python -m backend.cli --live
+  python -m backend.cli --live [--serve]
       Spawn dsd-fme, stream its stderr through parser + state manager, write
-      a periodic snapshot to snapshot.json. Audio goes to /tmp/dmr_audio.wav
-      via dsd-fme's own -o flag (Phase 4b will pipe it through ffmpeg/Icecast).
+      a periodic snapshot to snapshot.json. With --serve also runs a FastAPI
+      server (WebSocket + browser UI) on --port (default 8080).
 
-  python -m backend.cli --replay tests/captures/dmr_night_sample.log
-      Same pipeline, but read lines from a captured log instead. Useful for
-      smoke-testing without RF.
+  python -m backend.cli --replay FILE [--serve]
+      Same pipeline, but read lines from a captured log instead.
 
-Snapshot file is overwritten in place every `--snapshot-interval` seconds and
-also at clean shutdown. Phase 4 (FastAPI + WebSocket) will read this file or
-subscribe to a live event bus instead.
+Pass --serve to enable the browser dashboard at http://<host>:<port>/.
 """
 from __future__ import annotations
 
@@ -113,18 +110,25 @@ def _make_event_printer(state: StateManager, verbose: bool):
 
 
 async def _periodic_snapshot(
-    state: StateManager, path: Path, interval: float, stop_event: asyncio.Event
+    state: StateManager,
+    path: Path,
+    interval: float,
+    stop_event: asyncio.Event,
+    serve: bool,
 ) -> None:
+    from . import server as srv  # lazy import — only needed when --serve is active
     while not stop_event.is_set():
         try:
             await asyncio.wait_for(stop_event.wait(), timeout=interval)
-            break  # stop_event fired
+            break
         except asyncio.TimeoutError:
             pass
         try:
             path.write_text(state.snapshot().model_dump_json(indent=2))
         except Exception as e:  # noqa: BLE001
             print(f"# snapshot write failed: {e}", file=sys.stderr)
+        if serve:
+            await srv.push_snapshot()
 
 
 def _print_summary(state: StateManager) -> None:
@@ -147,7 +151,7 @@ def _print_summary(state: StateManager) -> None:
 def _parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(
         prog="dmr-monitor",
-        description="DMR Cap+ live monitor (Phase 3 CLI beta).",
+        description="DMR Cap+ live monitor (Phase 4a — FastAPI + WebSocket UI).",
     )
     mode = p.add_mutually_exclusive_group(required=True)
     mode.add_argument("--live", action="store_true", help="spawn dsd-fme and stream live")
@@ -169,6 +173,11 @@ def _parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
                    help="per-line sleep in replay mode to simulate live timing")
     p.add_argument("--verbose", action="store_true",
                    help="print every parsed event, including noisy control-channel heartbeats")
+
+    p.add_argument("--serve", action="store_true",
+                   help="start FastAPI WebSocket server and browser UI")
+    p.add_argument("--port", type=int, default=8080,
+                   help="HTTP/WebSocket port when --serve is used (default: %(default)s)")
     return p.parse_args(argv)
 
 
@@ -183,9 +192,26 @@ async def _run(args: argparse.Namespace) -> None:
     for sig in (signal.SIGINT, signal.SIGTERM):
         loop.add_signal_handler(sig, stop_event.set)
 
+    # ── Optional FastAPI / WebSocket server ──────────────────────────
+    if args.serve:
+        import uvicorn
+        from . import server as srv
+        srv.attach_state(state)
+        config = uvicorn.Config(
+            srv.app,
+            host="0.0.0.0",
+            port=args.port,
+            log_level="warning",
+            loop="none",
+        )
+        uv_server = uvicorn.Server(config)
+        uv_server.install_signal_handlers = lambda: None  # we handle signals
+        asyncio.create_task(uv_server.serve())
+        print(f"# dashboard → http://0.0.0.0:{args.port}/", file=sys.stderr)
+
     snapshot_path = Path(args.snapshot)
     snap_task = asyncio.create_task(
-        _periodic_snapshot(state, snapshot_path, args.snapshot_interval, stop_event)
+        _periodic_snapshot(state, snapshot_path, args.snapshot_interval, stop_event, args.serve)
     )
 
     if args.live:
