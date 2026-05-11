@@ -121,6 +121,8 @@ td {
 }
 tr:hover td { background: var(--bg3); }
 tr.active-row td { background: #1a2f1e; }
+tr.selected-row td { background: #2a3a52; box-shadow: inset 3px 0 0 var(--yellow); }
+tr.has-gps { cursor: pointer; }
 .badge {
   display: inline-block; padding: 1px 6px; border-radius: 3px;
   font-size: 10px; font-weight: 600; border: 1px solid;
@@ -235,9 +237,12 @@ L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
 
 const radioMarkers = {};  // radio_id → L.Marker
 const radioTrails  = {};  // radio_id → L.Polyline
+let selectedRadioId = null;
 
-function makeIcon(radioId, isActive) {
+function makeIcon(radioId, isActive, isSelected) {
   const color = isActive ? '#3fb950' : '#58a6ff';
+  const border = isSelected ? '3px solid #d29922' : '2px solid #0d1117';
+  const shadow = isSelected ? '0 0 10px #d29922' : `0 0 4px ${color}`;
   return L.divIcon({
     className: '',
     iconSize: [28, 28],
@@ -245,8 +250,23 @@ function makeIcon(radioId, isActive) {
     html: `<div style="background:${color};color:#0d1117;border-radius:50%;
                 width:28px;height:28px;display:flex;align-items:center;
                 justify-content:center;font-size:9px;font-weight:700;
-                border:2px solid #0d1117;box-shadow:0 0 4px ${color}">${radioId}</div>`,
+                border:${border};box-shadow:${shadow}">${radioId}</div>`,
   });
+}
+
+function selectRadio(id) {
+  selectedRadioId = (selectedRadioId === id) ? null : id;
+  if (!lastSnap) return;
+  updateMap(lastSnap);
+  renderRadios(lastSnap);
+  const r = lastSnap.radios[id];
+  if (selectedRadioId !== null && r && r.last_position) {
+    map.flyTo(
+      [r.last_position.lat, r.last_position.lon],
+      Math.max(map.getZoom(), 14),
+      { duration: 0.6 },
+    );
+  }
 }
 
 function updateMap(snapshot) {
@@ -262,7 +282,8 @@ function updateMap(snapshot) {
     if (!radio.last_position) continue;
     const { lat, lon } = radio.last_position;
     const isActive = activeIds.has(id);
-    const icon = makeIcon(id, isActive);
+    const isSelected = id === selectedRadioId;
+    const icon = makeIcon(id, isActive, isSelected);
 
     if (radioMarkers[id]) {
       radioMarkers[id].setLatLng([lat, lon]).setIcon(icon);
@@ -270,16 +291,22 @@ function updateMap(snapshot) {
       radioMarkers[id] = L.marker([lat, lon], { icon })
         .bindTooltip(`Radio ${id}`, { permanent: false })
         .addTo(map);
+      radioMarkers[id].on('click', () => selectRadio(id));
     }
 
-    // Trail
-    if (radio.position_history && radio.position_history.length > 1) {
+    // Trail — only render for the selected radio (avoid spaghetti).
+    if (isSelected && radio.position_history && radio.position_history.length > 1) {
       const pts = radio.position_history.map(p => [p.lat, p.lon]);
       if (radioTrails[id]) {
         radioTrails[id].setLatLngs(pts);
       } else {
-        radioTrails[id] = L.polyline(pts, { color: '#58a6ff', weight: 1.5, opacity: 0.5 }).addTo(map);
+        radioTrails[id] = L.polyline(pts, {
+          color: '#d29922', weight: 4, opacity: 0.85,
+        }).addTo(map);
       }
+    } else if (radioTrails[id]) {
+      map.removeLayer(radioTrails[id]);
+      delete radioTrails[id];
     }
   }
 }
@@ -388,8 +415,15 @@ function renderRadios(snap) {
   tbody.innerHTML = '';
   rows.forEach(r => {
     const isActive = activeIds.has(r.id);
+    const isSelected = r.id === selectedRadioId;
+    const hasGps = !!r.last_position;
     const tr = document.createElement('tr');
-    if (isActive) tr.className = 'active-row';
+    if (isActive)   tr.classList.add('active-row');
+    if (isSelected) tr.classList.add('selected-row');
+    if (hasGps) {
+      tr.classList.add('has-gps');
+      tr.onclick = () => selectRadio(r.id);
+    }
     const gps = r.last_position
       ? `<span class="badge badge-pos">GPS</span>`
       : `<span class="badge badge-no">—</span>`;
