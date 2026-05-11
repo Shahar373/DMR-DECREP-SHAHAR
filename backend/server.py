@@ -17,14 +17,16 @@ from pathlib import Path
 from typing import Optional
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, Response, StreamingResponse
 
+from .audio import AudioBroadcaster
 from .state import StateManager
 
 app = FastAPI(title="DMR Cap+ Monitor", docs_url=None, redoc_url=None)
 
 _state: Optional[StateManager] = None
 _subscribers: set[asyncio.Queue] = set()
+_audio: Optional[AudioBroadcaster] = None
 
 FRONTEND_DIR = Path(__file__).parent.parent / "frontend"
 
@@ -32,6 +34,11 @@ FRONTEND_DIR = Path(__file__).parent.parent / "frontend"
 def attach_state(sm: StateManager) -> None:
     global _state
     _state = sm
+
+
+def attach_audio(ab: AudioBroadcaster) -> None:
+    global _audio
+    _audio = ab
 
 
 async def push_snapshot() -> None:
@@ -46,6 +53,24 @@ async def push_snapshot() -> None:
         except asyncio.QueueFull:
             dead.add(q)
     _subscribers -= dead
+
+
+@app.get("/audio/stream")
+async def audio_stream():
+    if _audio is None:
+        return Response(status_code=503, content="Audio streaming not active")
+    return StreamingResponse(
+        _audio.subscribe(),
+        media_type="audio/mpeg",
+        headers={"Cache-Control": "no-cache", "X-Content-Type-Options": "nosniff"},
+    )
+
+
+@app.get("/audio/status")
+async def audio_status():
+    if _audio is None:
+        return {"available": False, "listeners": 0}
+    return {"available": True, "listeners": _audio.listener_count}
 
 
 @app.get("/api/snapshot")

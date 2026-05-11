@@ -193,10 +193,17 @@ async def _run(args: argparse.Namespace) -> None:
         loop.add_signal_handler(sig, stop_event.set)
 
     # ── Optional FastAPI / WebSocket server ──────────────────────────
+    _broadcaster = None
     if args.serve:
         import uvicorn
         from . import server as srv
         srv.attach_state(state)
+        if args.live:
+            from .audio import AudioBroadcaster
+            AudioBroadcaster.create_fifo()
+            _broadcaster = AudioBroadcaster()
+            _broadcaster.start()
+            srv.attach_audio(_broadcaster)
         config = uvicorn.Config(
             srv.app,
             host="0.0.0.0",
@@ -215,7 +222,12 @@ async def _run(args: argparse.Namespace) -> None:
     )
 
     if args.live:
-        cmd = [args.dsd_bin, "-fs", "-i", args.input, "-o", args.audio_out]
+        if _broadcaster is not None:
+            from .audio import AudioBroadcaster as _AB
+            audio_out = str(_AB.FIFO_PATH)
+        else:
+            audio_out = args.audio_out
+        cmd = [args.dsd_bin, "-fs", "-i", args.input, "-o", audio_out]
         print(f"# starting: {' '.join(cmd)}", file=sys.stderr)
         source = stream_subprocess(cmd, stop_event=stop_event)
     else:
@@ -226,6 +238,8 @@ async def _run(args: argparse.Namespace) -> None:
         await runner.consume_lines(source)
     finally:
         stop_event.set()
+        if _broadcaster:
+            _broadcaster.stop()
         snapshot_path.write_text(state.snapshot().model_dump_json(indent=2))
         snap_task.cancel()
         try:

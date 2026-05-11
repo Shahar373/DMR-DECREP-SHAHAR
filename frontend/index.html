@@ -130,6 +130,24 @@ tr.active-row td { background: #1a2f1e; }
 .badge-no   { color: var(--muted);  border-color: var(--border); }
 .muted { color: var(--muted); }
 
+/* ── Audio section ──────────────────────────────────────────────── */
+#audio-section {
+  border-top: 1px solid var(--border);
+  padding: 8px 12px;
+  flex-shrink: 0;
+}
+#audio-section h2 { border-bottom: none; padding: 0 0 6px 0; }
+#audio-row { display: flex; align-items: center; gap: 8px; }
+#audio-btn {
+  background: var(--bg3); border: 1px solid var(--border);
+  color: var(--text); border-radius: 4px; padding: 3px 10px;
+  cursor: pointer; font-size: 12px; white-space: nowrap;
+}
+#audio-btn:hover { border-color: var(--blue); color: var(--blue); }
+#audio-btn.playing { border-color: var(--green); color: var(--green); }
+#vol-slider { flex: 1; accent-color: var(--blue); }
+#audio-ind { font-size: 10px; color: var(--muted); white-space: nowrap; }
+
 /* ── Quality footer ─────────────────────────────────────────────── */
 #footer {
   background: var(--bg2); border-top: 1px solid var(--border);
@@ -159,6 +177,18 @@ tr.active-row td { background: #1a2f1e; }
   <div id="calls-panel">
     <h2>Active Calls</h2>
     <div id="calls-list"><div id="no-calls">No active calls</div></div>
+    <div id="audio-section">
+      <h2>Audio Stream</h2>
+      <div id="audio-row">
+        <button id="audio-btn" onclick="toggleAudio()">&#9654; Play</button>
+        <input type="range" id="vol-slider" min="0" max="1" step="0.05" value="0.8"
+               oninput="document.getElementById('audio-el').volume = this.value">
+        <span id="audio-ind">—</span>
+      </div>
+      <audio id="audio-el" preload="none" style="display:none">
+        <source src="/audio/stream" type="audio/mpeg">
+      </audio>
+    </div>
   </div>
 
   <div id="map-wrap">
@@ -451,6 +481,38 @@ setInterval(_pollFallback, 2000);
 
 // Keep the map from going stale when window is resized.
 window.addEventListener('resize', () => map.invalidateSize());
+
+// ── Audio player ──────────────────────────────────────────────────
+const audioEl = document.getElementById('audio-el');
+const audioBtn = document.getElementById('audio-btn');
+const audioInd = document.getElementById('audio-ind');
+
+audioEl.addEventListener('playing', () => {
+  audioBtn.textContent = '⏸ Mute';
+  audioBtn.className = 'playing';
+  audioInd.textContent = 'Streaming';
+  audioInd.style.color = 'var(--green)';
+});
+audioEl.addEventListener('pause', () => {
+  audioBtn.textContent = '▶ Play';
+  audioBtn.className = '';
+  audioInd.textContent = '—';
+  audioInd.style.color = 'var(--muted)';
+});
+audioEl.addEventListener('error', () => {
+  audioInd.textContent = 'Not available';
+  audioInd.style.color = 'var(--red)';
+});
+
+function toggleAudio() {
+  if (audioEl.paused) {
+    // Reload src to get a fresh stream start (avoids stale buffer)
+    audioEl.load();
+    audioEl.play().catch(() => {});
+  } else {
+    audioEl.pause();
+  }
+}
 </script>
 </body>
 </html>
