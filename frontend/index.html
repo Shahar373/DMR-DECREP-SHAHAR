@@ -180,12 +180,12 @@ tr.active-row td { background: #1a2f1e; }
     <div id="audio-section">
       <h2>Audio Stream</h2>
       <div id="audio-row">
-        <button id="audio-btn" onclick="toggleAudio()">&#9654; Play</button>
+        <button id="audio-btn" onclick="toggleMute()">&#x1F507; Muted</button>
         <input type="range" id="vol-slider" min="0" max="1" step="0.05" value="0.8"
-               oninput="document.getElementById('audio-el').volume = this.value">
-        <span id="audio-ind">—</span>
+               oninput="setAudioVolume(this.value)">
+        <span id="audio-ind">Starting…</span>
       </div>
-      <audio id="audio-el" preload="none" style="display:none">
+      <audio id="audio-el" autoplay muted preload="auto" style="display:none">
         <source src="/audio/stream" type="audio/mpeg">
       </audio>
     </div>
@@ -483,36 +483,63 @@ setInterval(_pollFallback, 2000);
 window.addEventListener('resize', () => map.invalidateSize());
 
 // ── Audio player ──────────────────────────────────────────────────
-const audioEl = document.getElementById('audio-el');
+// The stream starts muted immediately on page load.
+// One click on the button unmutes — no need to "remember to press play".
+const audioEl  = document.getElementById('audio-el');
 const audioBtn = document.getElementById('audio-btn');
 const audioInd = document.getElementById('audio-ind');
+let _audioAvail = false;
 
-audioEl.addEventListener('playing', () => {
-  audioBtn.textContent = '⏸ Mute';
-  audioBtn.className = 'playing';
-  audioInd.textContent = 'Streaming';
-  audioInd.style.color = 'var(--green)';
-});
-audioEl.addEventListener('pause', () => {
-  audioBtn.textContent = '▶ Play';
-  audioBtn.className = '';
-  audioInd.textContent = '—';
-  audioInd.style.color = 'var(--muted)';
-});
-audioEl.addEventListener('error', () => {
-  audioInd.textContent = 'Not available';
-  audioInd.style.color = 'var(--red)';
-});
-
-function toggleAudio() {
-  if (audioEl.paused) {
-    // Reload src to get a fresh stream start (avoids stale buffer)
-    audioEl.load();
-    audioEl.play().catch(() => {});
+function _setAudioUI() {
+  if (audioEl.muted) {
+    audioBtn.textContent = '🔇 Muted';
+    audioBtn.className = '';
+    audioInd.textContent = 'Muted (click to hear)';
+    audioInd.style.color = 'var(--muted)';
   } else {
-    audioEl.pause();
+    audioBtn.textContent = '🔊 Live';
+    audioBtn.className = 'playing';
+    audioInd.textContent = 'Live';
+    audioInd.style.color = 'var(--green)';
   }
 }
+
+function setAudioVolume(v) {
+  audioEl.volume = parseFloat(v);
+}
+
+function toggleMute() {
+  if (!_audioAvail) return;
+  if (audioEl.paused) {
+    audioEl.load();
+    audioEl.play().catch(() => {});
+  }
+  audioEl.muted = !audioEl.muted;
+  _setAudioUI();
+}
+
+audioEl.addEventListener('playing', _setAudioUI);
+audioEl.addEventListener('error', () => {
+  audioInd.textContent = 'Reconnecting…';
+  audioInd.style.color = 'var(--yellow)';
+  if (_audioAvail) setTimeout(() => { audioEl.load(); audioEl.play().catch(() => {}); }, 4000);
+});
+
+// Check the server, then start the stream immediately (muted).
+fetch('/audio/status').then(r => r.json()).then(s => {
+  if (!s.available) {
+    audioInd.textContent = 'N/A';
+    audioBtn.disabled = true;
+    return;
+  }
+  _audioAvail = true;
+  audioEl.volume = parseFloat(document.getElementById('vol-slider').value);
+  audioEl.play().catch(() => {});  // autoplay muted — always succeeds
+  _setAudioUI();
+}).catch(() => {
+  audioInd.textContent = 'N/A';
+  audioBtn.disabled = true;
+});
 </script>
 </body>
 </html>

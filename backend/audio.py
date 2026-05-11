@@ -80,8 +80,9 @@ class AudioBroadcaster:
         """Spawn ffmpeg, read its stdout, and fan chunks out to subscribers."""
         cmd = [
             "ffmpeg",
-            "-loglevel", "error",
+            "-loglevel", "warning",
             "-f", "wav",
+            "-fflags", "+discardcorrupt",  # tolerate WAV header size mismatch on FIFO
             "-i", str(FIFO_PATH),
             "-vn",
             "-codec:a", "libmp3lame",
@@ -95,7 +96,7 @@ class AudioBroadcaster:
             proc = await asyncio.create_subprocess_exec(
                 *cmd,
                 stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.DEVNULL,
+                stderr=None,  # inherit: ffmpeg warnings visible in the CLI log
             )
             assert proc.stdout is not None
             while True:
