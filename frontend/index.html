@@ -643,7 +643,26 @@ function playRecording(recId) {
   histAudio.play().then(() => {
     playingRecId = recId;
     renderHistory(_lastHist);
-  }).catch(() => { playingRecId = null; renderHistory(_lastHist); });
+  }).catch(err => {
+    playingRecId = null;
+    renderHistory(_lastHist);
+    showHistToast('Playback failed — no audio data yet');
+  });
+}
+
+function showHistToast(msg) {
+  let t = document.getElementById('hist-toast');
+  if (!t) {
+    t = document.createElement('div');
+    t.id = 'hist-toast';
+    t.style.cssText = 'position:absolute;bottom:8px;left:50%;transform:translateX(-50%);background:#c0392b;color:#fff;padding:4px 10px;border-radius:4px;font-size:11px;pointer-events:none;z-index:10;';
+    document.getElementById('history-section').style.position = 'relative';
+    document.getElementById('history-section').appendChild(t);
+  }
+  t.textContent = msg;
+  t.style.opacity = '1';
+  clearTimeout(t._tid);
+  t._tid = setTimeout(() => { t.style.opacity = '0'; }, 3000);
 }
 
 histAudio.addEventListener('ended', () => {
@@ -664,12 +683,14 @@ function renderHistory(list) {
     const div = document.createElement('div');
     div.className = 'hist-card' + (r.is_encrypted ? ' enc' : '') + (r.id === playingRecId ? ' playing' : '');
     const live = r.ended_at == null;
+    const empty = !live && (r.file_bytes === 0 || r.file_bytes == null);
+    const btnTitle = live ? 'Call in progress' : (empty ? 'No audio captured' : '');
     div.innerHTML = `
       <div class="hist-info">
         <div class="hist-line1">${r.src} → TG ${r.tgt}</div>
-        <div class="hist-line2">${fmtTime(r.started_at)} · ${live ? 'live' : fmtDuration(r.duration_seconds)} · slot ${r.slot}${r.is_encrypted ? ' · ENC' : ''}</div>
+        <div class="hist-line2">${fmtTime(r.started_at)} · ${live ? '<span style="color:var(--green)">live</span>' : fmtDuration(r.duration_seconds)} · slot ${r.slot}${r.is_encrypted ? ' · ENC' : ''}${empty ? ' · <span style="color:#888">no audio</span>' : ''}</div>
       </div>
-      <button class="hist-play" ${live ? 'disabled' : ''} onclick="playRecording('${r.id}')">${r.id === playingRecId ? '⏸' : '▶'}</button>
+      <button class="hist-play" ${(live || empty) ? 'disabled' : ''} title="${btnTitle}" onclick="playRecording('${r.id}')">${r.id === playingRecId ? '⏸' : '▶'}</button>
     `;
     el.appendChild(div);
   });

@@ -123,6 +123,8 @@ async def _periodic_snapshot(
             break
         except asyncio.TimeoutError:
             pass
+        from datetime import datetime as _dt
+        state.tick(_dt.now())
         try:
             path.write_text(state.snapshot().model_dump_json(indent=2))
         except Exception as e:  # noqa: BLE001
