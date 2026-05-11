@@ -241,6 +241,66 @@ def test_apply_auto_expires_old_call_when_new_event_arrives_later():
 
 
 # ===========================================================================
+# Call-lifecycle callbacks (for recording integration)
+# ===========================================================================
+
+
+def test_on_call_start_fires_when_new_active_call_is_created():
+    starts: list = []
+    sm = StateManager(on_call_start=lambda c: starts.append((c.slot, c.src, c.tgt)))
+    sm.apply(VoiceCallEvent(timestamp=_ts(1), raw_line="", slot=2, src=2102, tgt=1))
+    assert starts == [(2, 2102, 1)]
+
+    # Continuing frames from the same caller must NOT re-fire the callback.
+    sm.apply(VoiceCallEvent(timestamp=_ts(2), raw_line="", slot=2, src=2102, tgt=1))
+    assert starts == [(2, 2102, 1)]
+
+
+def test_on_call_end_fires_when_call_is_replaced_on_same_slot():
+    starts: list = []
+    ends: list = []
+    sm = StateManager(
+        on_call_start=lambda c: starts.append(c.src),
+        on_call_end=lambda c: ends.append(c.src),
+    )
+    sm.apply(VoiceCallEvent(timestamp=_ts(1), raw_line="", slot=2, src=2102, tgt=1))
+    sm.apply(VoiceCallEvent(timestamp=_ts(2), raw_line="", slot=2, src=223, tgt=1))
+    assert starts == [2102, 223]
+    assert ends == [2102]  # outgoing call ended exactly once when replaced
+
+
+def test_on_call_end_fires_when_idle_call_is_expired():
+    ends: list = []
+    sm = StateManager(
+        call_idle_timeout=timedelta(seconds=2),
+        on_call_end=lambda c: ends.append((c.slot, c.src)),
+    )
+    sm.apply(VoiceCallEvent(timestamp=_ts(1), raw_line="", slot=2, src=2102, tgt=1))
+    assert ends == []
+    sm.tick(_ts(10))
+    assert ends == [(2, 2102)]
+
+
+def test_callbacks_raising_exceptions_do_not_crash_state_machine():
+    def boom(_call):
+        raise RuntimeError("kaboom")
+
+    sm = StateManager(
+        call_idle_timeout=timedelta(seconds=2),
+        on_call_start=boom,
+        on_call_end=boom,
+    )
+    # Both start and end paths invoke the boom callback — neither must raise.
+    sm.apply(VoiceCallEvent(timestamp=_ts(1), raw_line="", slot=2, src=2102, tgt=1))
+    sm.apply(VoiceCallEvent(timestamp=_ts(2), raw_line="", slot=2, src=223, tgt=1))
+    sm.tick(_ts(10))
+    # State still consistent: call expired despite callback failures.
+    assert sm.active_calls == {}
+    # And both radios were still recorded.
+    assert {2102, 223} <= set(sm.radios)
+
+
+# ===========================================================================
 # Snapshot
 # ===========================================================================
 

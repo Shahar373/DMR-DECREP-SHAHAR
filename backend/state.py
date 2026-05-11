@@ -15,6 +15,7 @@ historical log uses the log's own timestamps as "now".
 """
 from __future__ import annotations
 
+from collections.abc import Callable
 from datetime import datetime, timedelta
 from typing import Optional
 
@@ -117,6 +118,8 @@ class StateManager:
         self,
         call_idle_timeout: timedelta = timedelta(seconds=2),
         position_history_length: int = 50,
+        on_call_start: Optional[Callable[[ActiveCall], None]] = None,
+        on_call_end: Optional[Callable[[ActiveCall], None]] = None,
     ) -> None:
         self.radios: dict[int, Radio] = {}
         self.active_calls: dict[int, ActiveCall] = {}
@@ -125,6 +128,8 @@ class StateManager:
         self._call_idle_timeout = call_idle_timeout
         self._position_history_length = position_history_length
         self._last_event_at: Optional[datetime] = None
+        self._on_call_start = on_call_start
+        self._on_call_end = on_call_end
 
     # --- public API ---
 
@@ -201,6 +206,12 @@ class StateManager:
             if now - call.last_frame_at > self._call_idle_timeout
         ]
         for slot in expired:
+            call = self.active_calls[slot]
+            if self._on_call_end is not None:
+                try:
+                    self._on_call_end(call)
+                except Exception:
+                    pass
             del self.active_calls[slot]
 
     # --- per-event handlers ---
@@ -226,7 +237,12 @@ class StateManager:
             if ev.rest_lsn is not None:
                 existing.rest_lsn = ev.rest_lsn
         else:
-            self.active_calls[ev.slot] = ActiveCall(
+            if existing is not None and self._on_call_end is not None:
+                try:
+                    self._on_call_end(existing)
+                except Exception:
+                    pass
+            new_call = ActiveCall(
                 slot=ev.slot,
                 src=ev.src,
                 tgt=ev.tgt,
@@ -236,6 +252,12 @@ class StateManager:
                 last_frame_at=ev.timestamp,
                 rest_lsn=ev.rest_lsn,
             )
+            self.active_calls[ev.slot] = new_call
+            if self._on_call_start is not None:
+                try:
+                    self._on_call_start(new_call)
+                except Exception:
+                    pass
 
     def _on_preamble_csbk(self, ev: PreambleCSBKEvent) -> None:
         self._touch_radio(ev.src, ev.timestamp)

@@ -17,9 +17,10 @@ from pathlib import Path
 from typing import Optional
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
-from fastapi.responses import HTMLResponse, Response, StreamingResponse
+from fastapi.responses import FileResponse, HTMLResponse, Response, StreamingResponse
 
 from .audio import AudioBroadcaster
+from .recordings import RecordingRegistry
 from .state import StateManager
 
 app = FastAPI(title="DMR Cap+ Monitor", docs_url=None, redoc_url=None)
@@ -27,6 +28,7 @@ app = FastAPI(title="DMR Cap+ Monitor", docs_url=None, redoc_url=None)
 _state: Optional[StateManager] = None
 _subscribers: set[asyncio.Queue] = set()
 _audio: Optional[AudioBroadcaster] = None
+_recordings: Optional[RecordingRegistry] = None
 
 FRONTEND_DIR = Path(__file__).parent.parent / "frontend"
 
@@ -39,6 +41,11 @@ def attach_state(sm: StateManager) -> None:
 def attach_audio(ab: AudioBroadcaster) -> None:
     global _audio
     _audio = ab
+
+
+def attach_recordings(r: RecordingRegistry) -> None:
+    global _recordings
+    _recordings = r
 
 
 async def push_snapshot() -> None:
@@ -78,6 +85,26 @@ async def get_snapshot():
     if _state is None:
         return {}
     return _state.snapshot().model_dump()
+
+
+@app.get("/api/recordings")
+async def list_recordings():
+    if _recordings is None:
+        return {"recordings": []}
+    return {"recordings": [r.model_dump() for r in _recordings.list_recent()]}
+
+
+@app.get("/recordings/{rec_id}.mp3")
+async def get_recording(rec_id: str):
+    if _recordings is None:
+        return Response(status_code=404)
+    rec = _recordings.get(rec_id)
+    if rec is None:
+        return Response(status_code=404)
+    p = _recordings.file_path(rec_id)
+    if not p.exists():
+        return Response(status_code=404)
+    return FileResponse(p, media_type="audio/mpeg")
 
 
 @app.websocket("/ws")

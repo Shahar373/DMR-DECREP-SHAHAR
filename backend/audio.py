@@ -18,7 +18,7 @@ from __future__ import annotations
 import asyncio
 import os
 from pathlib import Path
-from typing import AsyncGenerator
+from typing import AsyncGenerator, BinaryIO
 
 FIFO_PATH = Path("/tmp/dmr_audio.fifo")
 CHUNK_SIZE = 4096
@@ -32,6 +32,7 @@ class AudioBroadcaster:
     def __init__(self) -> None:
         self._subscribers: list[asyncio.Queue[bytes | None]] = []
         self._task: asyncio.Task | None = None
+        self._recorders: dict[str, BinaryIO] = {}  # rec_id -> open file
 
     # ── Public API ────────────────────────────────────────────────────
 
@@ -74,6 +75,21 @@ class AudioBroadcaster:
     def listener_count(self) -> int:
         return len(self._subscribers)
 
+    def start_recording(self, rec_id: str, path: Path) -> None:
+        """Open ``path`` for binary write; subsequent MP3 chunks are mirrored
+        into it until ``stop_recording`` is called."""
+        path.parent.mkdir(parents=True, exist_ok=True)
+        self._recorders[rec_id] = open(path, "wb")
+
+    def stop_recording(self, rec_id: str) -> None:
+        """Close the file opened by ``start_recording``; no-op if unknown."""
+        f = self._recorders.pop(rec_id, None)
+        if f is not None:
+            try:
+                f.close()
+            except Exception:
+                pass
+
     # ── Internal ──────────────────────────────────────────────────────
 
     async def _run(self) -> None:
@@ -114,6 +130,16 @@ class AudioBroadcaster:
                         self._subscribers.remove(q)
                     except ValueError:
                         pass
+                # Mirror the chunk into every active per-call recorder.
+                for rec_id, f in list(self._recorders.items()):
+                    try:
+                        f.write(chunk)
+                    except Exception:
+                        try:
+                            f.close()
+                        except Exception:
+                            pass
+                        self._recorders.pop(rec_id, None)
         except asyncio.CancelledError:
             pass
         finally:
@@ -123,6 +149,13 @@ class AudioBroadcaster:
                     q.put_nowait(None)
                 except asyncio.QueueFull:
                     pass
+            # Close all open per-call recorders.
+            for rec_id, f in list(self._recorders.items()):
+                try:
+                    f.close()
+                except Exception:
+                    pass
+                self._recorders.pop(rec_id, None)
             if proc is not None:
                 try:
                     proc.terminate()

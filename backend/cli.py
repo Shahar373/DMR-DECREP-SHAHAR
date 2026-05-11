@@ -182,26 +182,55 @@ def _parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
 
 
 async def _run(args: argparse.Namespace) -> None:
-    state = StateManager()
+    stop_event = asyncio.Event()
+
+    # ── Per-call recording wiring (needs to exist before StateManager so
+    # the on_call_start / on_call_end callbacks can capture it) ──────
+    recordings = None
+    _broadcaster = None
+    if args.serve:
+        from .recordings import RecordingRegistry
+        recordings = RecordingRegistry(Path("/tmp/dmr_calls"))
+        if args.live:
+            from .audio import AudioBroadcaster
+            AudioBroadcaster.create_fifo()
+            _broadcaster = AudioBroadcaster()
+
+    def _on_call_start(call) -> None:
+        if recordings is None:
+            return
+        rec = recordings.start(call)
+        if _broadcaster is not None:
+            _broadcaster.start_recording(rec.id, recordings.file_path(rec.id))
+
+    def _on_call_end(call) -> None:
+        if recordings is None:
+            return
+        if _broadcaster is not None:
+            rec_id = recordings.active_id(call.slot)
+            if rec_id is not None:
+                _broadcaster.stop_recording(rec_id)
+        recordings.end(call.slot, call.last_frame_at)
+
+    state = StateManager(
+        on_call_start=_on_call_start,
+        on_call_end=_on_call_end,
+    )
     printer = _make_event_printer(state, args.verbose)
     runner = LineRunner(state, on_event=printer)
-
-    stop_event = asyncio.Event()
 
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGINT, signal.SIGTERM):
         loop.add_signal_handler(sig, stop_event.set)
 
     # ── Optional FastAPI / WebSocket server ──────────────────────────
-    _broadcaster = None
     if args.serve:
         import uvicorn
         from . import server as srv
         srv.attach_state(state)
-        if args.live:
-            from .audio import AudioBroadcaster
-            AudioBroadcaster.create_fifo()
-            _broadcaster = AudioBroadcaster()
+        if recordings is not None:
+            srv.attach_recordings(recordings)
+        if _broadcaster is not None:
             _broadcaster.start()
             srv.attach_audio(_broadcaster)
         config = uvicorn.Config(
