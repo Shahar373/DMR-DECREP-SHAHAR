@@ -1,0 +1,18 @@
+[Unit]
+Description=DMR Cap+ Monitor Dashboard
+After=network.target
+
+[Service]
+WorkingDirectory=/home/shahar/DMR-DECREP-SHAHAR
+ExecStart=/home/shahar/DMR-DECREP-SHAHAR/.venv/bin/python -m backend.cli \
+    --live \
+    --input pulse:dmr_capture.monitor \
+    --audio-out /tmp/dmr_audio.wav \
+    --serve \
+    --port 8080
+Restart=on-failure
+RestartSec=5s
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=default.target
