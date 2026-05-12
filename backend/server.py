@@ -94,6 +94,37 @@ async def list_recordings():
     return {"recordings": [r.model_dump() for r in _recordings.list_recent()]}
 
 
+@app.get("/api/debug")
+async def debug_info():
+    import os
+    from pathlib import Path
+
+    recs = _recordings.list_recent() if _recordings else []
+    fifo = Path("/tmp/dmr_audio.fifo")
+    calls_dir = Path("/tmp/dmr_calls")
+
+    files_on_disk = []
+    if calls_dir.exists():
+        for p in sorted(calls_dir.iterdir()):
+            try:
+                files_on_disk.append({"name": p.name, "bytes": p.stat().st_size})
+            except OSError:
+                pass
+
+    return {
+        "audio_broadcaster_active": _audio is not None,
+        "broadcaster_task_alive": (
+            _audio._task is not None and not _audio._task.done()
+            if _audio else False
+        ),
+        "fifo_exists": fifo.exists(),
+        "subscribers": _audio.listener_count if _audio else 0,
+        "recordings_in_memory": len(recs),
+        "recordings_all": [r.model_dump() for r in recs],
+        "files_on_disk": files_on_disk,
+    }
+
+
 @app.get("/recordings/{rec_id}.mp3")
 async def get_recording(rec_id: str):
     if _recordings is None:
