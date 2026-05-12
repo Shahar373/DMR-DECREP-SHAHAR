@@ -195,7 +195,6 @@ async def _run(args: argparse.Namespace) -> None:
         recordings = RecordingRegistry(Path("/tmp/dmr_calls"))
         if args.live:
             from .audio import AudioBroadcaster
-            AudioBroadcaster.create_fifo()
             _broadcaster = AudioBroadcaster()
 
     def _on_call_start(call) -> None:
@@ -253,14 +252,19 @@ async def _run(args: argparse.Namespace) -> None:
     )
 
     if args.live:
+        import os as _os
+        dsd_env = _os.environ.copy()
         if _broadcaster is not None:
             from .audio import AudioBroadcaster as _AB
-            audio_out = str(_AB.FIFO_PATH)
+            # Route dsd-fme decoded audio to the PulseAudio null sink so
+            # ffmpeg can capture it from the monitor.
+            dsd_env["PULSE_SINK"] = _AB.PULSE_SINK
+            cmd = [args.dsd_bin, "-fs", "-i", args.input]
         else:
-            audio_out = args.audio_out
-        cmd = [args.dsd_bin, "-fs", "-i", args.input, "-o", audio_out]
+            cmd = [args.dsd_bin, "-fs", "-i", args.input, "-o", args.audio_out]
+            dsd_env = None  # type: ignore[assignment]
         print(f"# starting: {' '.join(cmd)}", file=sys.stderr)
-        source = stream_subprocess(cmd, stop_event=stop_event)
+        source = stream_subprocess(cmd, stop_event=stop_event, env=dsd_env)
     else:
         print(f"# replaying {args.replay} (delay={args.replay_delay}s)", file=sys.stderr)
         source = stream_file(args.replay, delay=args.replay_delay, stop_event=stop_event)

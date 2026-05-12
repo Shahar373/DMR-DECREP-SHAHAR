@@ -13,6 +13,7 @@ ExecStart=/home/shahar/DMR-DECREP-SHAHAR/.venv/bin/python -m backend.cli \
 Restart=on-failure
 RestartSec=5s
 Environment=PYTHONUNBUFFERED=1
+Environment=PULSE_SINK=dsd_decoded
 
 [Install]
 WantedBy=default.target

@@ -1,11 +1,19 @@
 """Audio broadcaster for DMR Cap+ Monitor (Phase 4b).
 
-Reads decoded DMR audio from dsd-fme via a named FIFO, encodes it to MP3
-with ffmpeg, and fans the chunks out to all connected HTTP streaming clients.
+Reads decoded DMR audio from a PulseAudio null-sink monitor, encodes it
+to MP3 with ffmpeg, and fans the chunks out to all connected HTTP
+streaming clients.
+
+Setup (once, on the Pi):
+    pactl load-module module-null-sink \\
+        sink_name=dsd_decoded \\
+        sink_properties=device.description=DSD_Decoded_Output
+
+Then launch dsd-fme with PULSE_SINK=dsd_decoded so its decoded voice
+audio lands in that sink.  ffmpeg reads from dsd_decoded.monitor.
 
 Usage::
 
-    AudioBroadcaster.create_fifo()          # once, before dsd-fme starts
     ab = AudioBroadcaster()
     ab.start()                              # spawns ffmpeg task
     srv.attach_audio(ab)                    # register with FastAPI
@@ -16,18 +24,17 @@ Usage::
 from __future__ import annotations
 
 import asyncio
-import os
 from pathlib import Path
 from typing import AsyncGenerator, BinaryIO
 
-FIFO_PATH = Path("/tmp/dmr_audio.fifo")
+PULSE_SINK = "dsd_decoded"   # dsd-fme outputs here; ffmpeg reads .monitor
 CHUNK_SIZE = 4096
 
 
 class AudioBroadcaster:
-    """Encode audio from a WAV FIFO and broadcast MP3 chunks to subscribers."""
+    """Encode audio from a PulseAudio monitor and broadcast MP3 chunks."""
 
-    FIFO_PATH: Path = FIFO_PATH
+    PULSE_SINK: str = PULSE_SINK
 
     def __init__(self) -> None:
         self._subscribers: list[asyncio.Queue[bytes | None]] = []
@@ -35,16 +42,6 @@ class AudioBroadcaster:
         self._recorders: dict[str, BinaryIO] = {}  # rec_id -> open file
 
     # ── Public API ────────────────────────────────────────────────────
-
-    @staticmethod
-    def create_fifo() -> Path:
-        """Remove any stale FIFO and create a fresh one; return the path."""
-        try:
-            FIFO_PATH.unlink()
-        except FileNotFoundError:
-            pass
-        os.mkfifo(FIFO_PATH)
-        return FIFO_PATH
 
     def start(self) -> None:
         """Schedule the ffmpeg reader as an asyncio task."""
@@ -93,15 +90,12 @@ class AudioBroadcaster:
     # ── Internal ──────────────────────────────────────────────────────
 
     async def _run(self) -> None:
-        """Spawn ffmpeg, read its stdout, and fan chunks out to subscribers."""
-        # dsd-fme writes raw signed-16-bit PCM at 8000 Hz mono (no WAV header).
+        """Spawn ffmpeg reading from PulseAudio, fan MP3 chunks to subscribers."""
         cmd = [
             "ffmpeg",
             "-loglevel", "warning",
-            "-f", "s16le",   # raw PCM – what dsd-fme actually writes to the FIFO
-            "-ar", "8000",
-            "-ac", "1",
-            "-i", str(FIFO_PATH),
+            "-f", "pulse",
+            "-i", f"{PULSE_SINK}.monitor",
             "-vn",
             "-codec:a", "libmp3lame",
             "-b:a", "16k",
@@ -145,13 +139,11 @@ class AudioBroadcaster:
         except asyncio.CancelledError:
             pass
         finally:
-            # Signal all waiting subscribers that the stream is over.
             for q in list(self._subscribers):
                 try:
                     q.put_nowait(None)
                 except asyncio.QueueFull:
                     pass
-            # Close all open per-call recorders.
             for rec_id, f in list(self._recorders.items()):
                 try:
                     f.close()

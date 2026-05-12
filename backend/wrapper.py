@@ -57,17 +57,19 @@ class LineRunner:
 async def stream_subprocess(
     args: list[str],
     stop_event: Optional[asyncio.Event] = None,
+    env: Optional[dict] = None,
 ) -> AsyncIterator[str]:
     """Spawn a subprocess and yield its stderr line by line.
 
-    stdout is discarded (dsd-fme writes WAV via its own `-o` flag, not stdout).
     When `stop_event` fires the child is SIGTERM'd; on shutdown we wait up to
-    2s before SIGKILL.
+    2s before SIGKILL.  Pass ``env`` to override the inherited environment
+    (e.g. to set PULSE_SINK for dsd-fme).
     """
     proc = await asyncio.create_subprocess_exec(
         *args,
         stdout=asyncio.subprocess.DEVNULL,
         stderr=asyncio.subprocess.PIPE,
+        env=env,
     )
     assert proc.stderr is not None
 
