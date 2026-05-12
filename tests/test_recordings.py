@@ -1,192 +1,156 @@
-"""Tests for backend.recordings.RecordingRegistry.
+"""Tests for the filesystem-based RecordingRegistry.
 
-Exercises the per-call MP3 metadata registry that backs the dashboard's
-"recent calls" panel. The registry only tracks state + file lifecycle —
-actual MP3 bytes are written by AudioBroadcaster, so we simulate that by
-touching files in `base_dir` with `tmp_path`.
+The registry scans a directory for per-call WAV files written by dsd-fme
+(via ``-7 <dir> -P``). We fake those WAVs by writing minimal valid PCM
+headers + a tiny payload, then verify duration parsing, filename parsing,
+filtering, and ordering.
 """
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+import os
+import struct
+import time
 from pathlib import Path
 
-from backend.recordings import RecordingRegistry
+from backend.recordings import RecordingRegistry, _parse_filename, _read_wav_duration
 
 
-class _FakeCall:
-    """Minimal stand-in for ActiveCall — only attributes the registry reads."""
-
-    def __init__(
-        self,
-        src: int,
-        tgt: int,
-        slot: int,
-        started_at: datetime,
-        is_cap_plus: bool = False,
-        is_encrypted: bool = False,
-    ) -> None:
-        self.src = src
-        self.tgt = tgt
-        self.slot = slot
-        self.started_at = started_at
-        self.is_cap_plus = is_cap_plus
-        self.is_encrypted = is_encrypted
+def _write_wav(path: Path, duration_sec: float, sample_rate: int = 8000) -> None:
+    """Write a minimal valid PCM-WAV at the given duration."""
+    n_samples = int(duration_sec * sample_rate)
+    byte_rate = sample_rate * 2  # 16-bit mono
+    data_size = n_samples * 2
+    header = b"RIFF"
+    header += struct.pack("<I", 36 + data_size)
+    header += b"WAVE"
+    header += b"fmt "
+    header += struct.pack("<I", 16)
+    header += struct.pack("<HHIIHH", 1, 1, sample_rate, byte_rate, 2, 16)
+    header += b"data"
+    header += struct.pack("<I", data_size)
+    payload = b"\x00\x00" * n_samples
+    path.write_bytes(header + payload)
 
 
-def _ts(s: int = 0) -> datetime:
-    return datetime(2026, 5, 10, 21, 0, s)
+def _age_file(path: Path, seconds: float) -> None:
+    """Move mtime back so the file isn't filtered as 'still being written'."""
+    t = time.time() - seconds
+    os.utime(path, (t, t))
 
 
-# ===========================================================================
-# Basic lifecycle
-# ===========================================================================
+# ── Filename parsing ─────────────────────────────────────────────────
+
+def test_parse_filename_extracts_tg_src_slot():
+    tg, src, slot = _parse_filename("2024-01-15_14-30-25_DMR_TG_64250_SRC_2102_slot_1.wav")
+    assert tg == 64250
+    assert src == 2102
+    assert slot == 1
 
 
-def test_start_end_list_recent_cycle(tmp_path: Path):
-    reg = RecordingRegistry(tmp_path)
-    call = _FakeCall(src=2102, tgt=1, slot=2, started_at=_ts(1))
-
-    rec = reg.start(call)
-    assert rec.src == 2102 and rec.tgt == 1 and rec.slot == 2
-    assert rec.ended_at is None
-    assert reg.active_id(2) == rec.id
-
-    # While the call is live, it appears in list_recent with no ended_at.
-    live_list = reg.list_recent()
-    assert len(live_list) == 1
-    assert live_list[0].id == rec.id and live_list[0].ended_at is None
-
-    ended = reg.end(2, _ts(5))
-    assert ended is not None
-    assert ended.id == rec.id
-    assert ended.ended_at == _ts(5)
-    assert ended.duration_seconds == 4.0
-    assert reg.active_id(2) is None
+def test_parse_filename_returns_none_when_absent():
+    tg, src, slot = _parse_filename("random_filename.wav")
+    assert tg is None and src is None and slot is None
 
 
-def test_list_recent_returns_newest_first(tmp_path: Path):
-    reg = RecordingRegistry(tmp_path)
-    r1 = reg.start(_FakeCall(1, 10, 1, _ts(1)))
-    reg.end(1, _ts(2))
-    r2 = reg.start(_FakeCall(2, 20, 1, _ts(3)))
-    reg.end(1, _ts(4))
-    r3 = reg.start(_FakeCall(3, 30, 2, _ts(5)))
-
-    ids = [r.id for r in reg.list_recent()]
-    assert ids == [r3.id, r2.id, r1.id]
+def test_parse_filename_handles_variant_separators():
+    tg, src, _ = _parse_filename("DMR_TGT123_RID456.wav")
+    assert tg == 123
+    assert src == 456
 
 
-def test_active_id_returns_none_for_unknown_slot(tmp_path: Path):
-    reg = RecordingRegistry(tmp_path)
-    assert reg.active_id(1) is None
-    reg.start(_FakeCall(1, 10, 2, _ts(1)))
-    assert reg.active_id(1) is None
-    assert reg.active_id(2) is not None
+# ── WAV header parsing ───────────────────────────────────────────────
+
+def test_read_wav_duration_parses_standard_header(tmp_path: Path):
+    p = tmp_path / "x.wav"
+    _write_wav(p, duration_sec=1.5)
+    d = _read_wav_duration(p)
+    assert abs(d - 1.5) < 0.01
 
 
-# ===========================================================================
-# end() edge cases
-# ===========================================================================
+def test_read_wav_duration_returns_zero_for_non_wav(tmp_path: Path):
+    p = tmp_path / "not_a_wav.wav"
+    p.write_bytes(b"garbage data")
+    assert _read_wav_duration(p) == 0.0
 
 
-def test_end_without_matching_start_returns_none(tmp_path: Path):
-    reg = RecordingRegistry(tmp_path)
-    assert reg.end(2, _ts(5)) is None
+def test_read_wav_duration_falls_back_to_filesize_when_data_size_unset(tmp_path: Path):
+    """If a writer leaves data_size=0 (streaming WAV), use file size."""
+    p = tmp_path / "streaming.wav"
+    header = b"RIFF" + struct.pack("<I", 0) + b"WAVE"
+    header += b"fmt " + struct.pack("<I", 16)
+    header += struct.pack("<HHIIHH", 1, 1, 8000, 16000, 2, 16)
+    header += b"data" + struct.pack("<I", 0)
+    p.write_bytes(header + b"\x00" * 16000)
+    d = _read_wav_duration(p)
+    assert abs(d - 1.0) < 0.05
 
 
-def test_end_on_wrong_slot_is_noop(tmp_path: Path):
-    reg = RecordingRegistry(tmp_path)
-    rec = reg.start(_FakeCall(1, 10, 2, _ts(1)))
-    # End on slot 1 (the call is on slot 2) — should not touch the slot-2 rec.
-    assert reg.end(1, _ts(5)) is None
-    assert reg.active_id(2) == rec.id
-    fresh = reg.get(rec.id)
-    assert fresh is not None and fresh.ended_at is None
+# ── Registry behaviour ───────────────────────────────────────────────
+
+def test_list_recent_returns_empty_when_dir_is_empty(tmp_path: Path):
+    r = RecordingRegistry(tmp_path)
+    assert r.list_recent() == []
 
 
-# ===========================================================================
-# File bytes captured
-# ===========================================================================
+def test_list_recent_returns_wavs_meeting_min_duration(tmp_path: Path):
+    p = tmp_path / "DMR_TG_1_SRC_2.wav"
+    _write_wav(p, duration_sec=1.0)
+    _age_file(p, seconds=10)
+    r = RecordingRegistry(tmp_path, min_duration=0.2)
+    out = r.list_recent()
+    assert len(out) == 1
+    assert out[0].filename == p.name
+    assert out[0].tgt == 1
+    assert out[0].src == 2
+    assert abs(out[0].duration_seconds - 1.0) < 0.05
 
 
-def test_file_bytes_captured_when_file_exists(tmp_path: Path):
-    reg = RecordingRegistry(tmp_path)
-    rec = reg.start(_FakeCall(1, 10, 2, _ts(1)))
-    # Simulate the broadcaster having written some MP3 bytes for this call.
-    reg.file_path(rec.id).write_bytes(b"\xff\xfb" * 100)
-    ended = reg.end(2, _ts(2))
-    assert ended is not None
-    assert ended.file_bytes == 200
+def test_list_recent_filters_short_recordings(tmp_path: Path):
+    short = tmp_path / "short.wav"
+    long_ = tmp_path / "long.wav"
+    _write_wav(short, duration_sec=0.1)
+    _write_wav(long_, duration_sec=0.5)
+    _age_file(short, seconds=10)
+    _age_file(long_, seconds=10)
+    r = RecordingRegistry(tmp_path, min_duration=0.2)
+    out = r.list_recent()
+    assert {x.filename for x in out} == {"long.wav"}
 
 
-def test_file_bytes_zero_when_file_missing(tmp_path: Path):
-    reg = RecordingRegistry(tmp_path)
-    reg.start(_FakeCall(1, 10, 2, _ts(1)))
-    # No file ever created — end() should still succeed with file_bytes=0.
-    ended = reg.end(2, _ts(2))
-    assert ended is not None
-    assert ended.file_bytes == 0
+def test_list_recent_skips_files_still_being_written(tmp_path: Path):
+    """Recent mtime means dsd-fme might still be writing — skip until settled."""
+    p = tmp_path / "fresh.wav"
+    _write_wav(p, duration_sec=1.0)
+    # Don't age it: mtime is now.
+    r = RecordingRegistry(tmp_path, min_duration=0.2, ignore_recent_seconds=1.5)
+    assert r.list_recent() == []
 
 
-# ===========================================================================
-# Pruning
-# ===========================================================================
+def test_list_recent_ignores_non_wav_files(tmp_path: Path):
+    (tmp_path / "note.txt").write_text("hi")
+    (tmp_path / "garbage.bin").write_bytes(b"\x00")
+    p = tmp_path / "real.wav"
+    _write_wav(p, duration_sec=1.0)
+    _age_file(p, seconds=10)
+    r = RecordingRegistry(tmp_path, min_duration=0.2)
+    out = r.list_recent()
+    assert [x.filename for x in out] == ["real.wav"]
 
 
-def test_pruning_keeps_only_max_keep(tmp_path: Path):
-    reg = RecordingRegistry(tmp_path, max_keep=3)
-    for i in range(5):
-        rec = reg.start(_FakeCall(i, 10, 1, _ts(i)))
-        reg.file_path(rec.id).write_bytes(b"x")
-        reg.end(1, _ts(i) + timedelta(milliseconds=500))
-
-    assert len(reg.list_recent()) == 3
-
-
-def test_pruning_deletes_old_files_from_disk(tmp_path: Path):
-    reg = RecordingRegistry(tmp_path, max_keep=2)
-    paths: list[Path] = []
-    for i in range(4):
-        rec = reg.start(_FakeCall(i, 10, 1, _ts(i)))
-        p = reg.file_path(rec.id)
-        p.write_bytes(b"x")
-        paths.append(p)
-        reg.end(1, _ts(i) + timedelta(milliseconds=500))
-
-    # First two recordings should have been pruned from both memory and disk.
-    assert not paths[0].exists()
-    assert not paths[1].exists()
-    # Latest two should survive.
-    assert paths[2].exists()
-    assert paths[3].exists()
-    assert len(reg.list_recent()) == 2
+def test_list_recent_sorts_newest_first(tmp_path: Path):
+    older = tmp_path / "older.wav"
+    newer = tmp_path / "newer.wav"
+    _write_wav(older, duration_sec=0.5)
+    _write_wav(newer, duration_sec=0.5)
+    _age_file(older, seconds=60)
+    _age_file(newer, seconds=10)
+    r = RecordingRegistry(tmp_path, min_duration=0.2)
+    out = r.list_recent()
+    assert [x.filename for x in out] == ["newer.wav", "older.wav"]
 
 
-def test_pruning_tolerates_missing_files(tmp_path: Path):
-    """If a file was already deleted, _prune must not blow up."""
-    reg = RecordingRegistry(tmp_path, max_keep=1)
-    r1 = reg.start(_FakeCall(1, 10, 1, _ts(1)))
-    reg.end(1, _ts(2))
-    # The file was never created — pruning should silently skip the unlink.
-    reg.start(_FakeCall(2, 10, 1, _ts(3)))
-    reg.end(1, _ts(4))
-    assert reg.get(r1.id) is None
-    assert len(reg.list_recent()) == 1
-
-
-# ===========================================================================
-# get() lookups
-# ===========================================================================
-
-
-def test_get_returns_none_for_unknown_id(tmp_path: Path):
-    reg = RecordingRegistry(tmp_path)
-    assert reg.get("deadbeef") is None
-
-
-def test_get_finds_live_and_ended_recordings(tmp_path: Path):
-    reg = RecordingRegistry(tmp_path)
-    rec = reg.start(_FakeCall(1, 10, 2, _ts(1)))
-    assert reg.get(rec.id) is not None
-    reg.end(2, _ts(5))
-    assert reg.get(rec.id) is not None  # ended recordings still queryable
+def test_file_path_prevents_path_traversal(tmp_path: Path):
+    r = RecordingRegistry(tmp_path)
+    p = r.file_path("../../etc/passwd")
+    assert p.parent == tmp_path
+    assert p.name == "passwd"

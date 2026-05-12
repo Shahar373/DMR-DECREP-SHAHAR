@@ -1,14 +1,11 @@
-"""FastAPI server for the DMR Cap+ Monitor dashboard (Phase 4a).
+"""FastAPI server for the DMR Cap+ Monitor dashboard.
 
 Exposes:
-  GET  /              → serves frontend/index.html
-  GET  /api/snapshot  → current DashboardSnapshot as JSON (HTTP polling fallback)
-  WS   /ws            → pushes a snapshot JSON every broadcast cycle
-
-The StateManager is injected via `attach_state()` before uvicorn starts.
-`push_snapshot()` is called periodically by the CLI event loop so the server
-itself does not need an internal timer — it just fans the payload out to all
-connected clients.
+  GET  /                       → serves frontend/index.html
+  GET  /api/snapshot           → current DashboardSnapshot as JSON
+  GET  /api/recordings         → list per-call WAVs written by dsd-fme
+  GET  /recordings/{filename}  → stream a WAV file
+  WS   /ws                     → pushes a snapshot JSON every broadcast cycle
 """
 from __future__ import annotations
 
@@ -17,9 +14,8 @@ from pathlib import Path
 from typing import Optional
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse, HTMLResponse, Response, StreamingResponse
+from fastapi.responses import FileResponse, HTMLResponse, Response
 
-from .audio import AudioBroadcaster
 from .recordings import RecordingRegistry
 from .state import StateManager
 
@@ -27,7 +23,6 @@ app = FastAPI(title="DMR Cap+ Monitor", docs_url=None, redoc_url=None)
 
 _state: Optional[StateManager] = None
 _subscribers: set[asyncio.Queue] = set()
-_audio: Optional[AudioBroadcaster] = None
 _recordings: Optional[RecordingRegistry] = None
 
 FRONTEND_DIR = Path(__file__).parent.parent / "frontend"
@@ -36,11 +31,6 @@ FRONTEND_DIR = Path(__file__).parent.parent / "frontend"
 def attach_state(sm: StateManager) -> None:
     global _state
     _state = sm
-
-
-def attach_audio(ab: AudioBroadcaster) -> None:
-    global _audio
-    _audio = ab
 
 
 def attach_recordings(r: RecordingRegistry) -> None:
@@ -62,24 +52,6 @@ async def push_snapshot() -> None:
     _subscribers -= dead
 
 
-@app.get("/audio/stream")
-async def audio_stream():
-    if _audio is None:
-        return Response(status_code=503, content="Audio streaming not active")
-    return StreamingResponse(
-        _audio.subscribe(),
-        media_type="audio/mpeg",
-        headers={"Cache-Control": "no-cache", "X-Content-Type-Options": "nosniff"},
-    )
-
-
-@app.get("/audio/status")
-async def audio_status():
-    if _audio is None:
-        return {"available": False, "listeners": 0}
-    return {"available": True, "listeners": _audio.listener_count}
-
-
 @app.get("/api/snapshot")
 async def get_snapshot():
     if _state is None:
@@ -91,51 +63,38 @@ async def get_snapshot():
 async def list_recordings():
     if _recordings is None:
         return {"recordings": []}
-    return {"recordings": [r.model_dump() for r in _recordings.list_recent()]}
+    return {"recordings": [r.model_dump(mode="json") for r in _recordings.list_recent()]}
 
 
 @app.get("/api/debug")
 async def debug_info():
-    import os
-    from pathlib import Path
-
     recs = _recordings.list_recent() if _recordings else []
-    fifo = Path("/tmp/dmr_audio.fifo")
-    calls_dir = Path("/tmp/dmr_calls")
-
+    base = _recordings.base_dir if _recordings else None
     files_on_disk = []
-    if calls_dir.exists():
-        for p in sorted(calls_dir.iterdir()):
+    if base is not None and base.exists():
+        for p in sorted(base.iterdir()):
             try:
                 files_on_disk.append({"name": p.name, "bytes": p.stat().st_size})
             except OSError:
                 pass
-
     return {
-        "audio_broadcaster_active": _audio is not None,
-        "broadcaster_task_alive": (
-            _audio._task is not None and not _audio._task.done()
-            if _audio else False
-        ),
-        "fifo_exists": fifo.exists(),
-        "subscribers": _audio.listener_count if _audio else 0,
-        "recordings_in_memory": len(recs),
-        "recordings_all": [r.model_dump() for r in recs],
-        "files_on_disk": files_on_disk,
+        "calls_dir": str(base) if base else None,
+        "min_duration": _recordings.min_duration if _recordings else None,
+        "recordings_visible": len(recs),
+        "files_on_disk_total": len(files_on_disk),
+        "files_on_disk": files_on_disk[:50],  # cap output
+        "recordings": [r.model_dump(mode="json") for r in recs[:20]],
     }
 
 
-@app.get("/recordings/{rec_id}.mp3")
-async def get_recording(rec_id: str):
+@app.get("/recordings/{filename}")
+async def get_recording(filename: str):
     if _recordings is None:
         return Response(status_code=404)
-    rec = _recordings.get(rec_id)
-    if rec is None:
+    p = _recordings.file_path(filename)
+    if not p.exists() or not p.is_file():
         return Response(status_code=404)
-    p = _recordings.file_path(rec_id)
-    if not p.exists():
-        return Response(status_code=404)
-    return FileResponse(p, media_type="audio/mpeg")
+    return FileResponse(p, media_type="audio/wav")
 
 
 @app.websocket("/ws")
@@ -144,7 +103,6 @@ async def ws_endpoint(websocket: WebSocket):
     q: asyncio.Queue = asyncio.Queue(maxsize=10)
     _subscribers.add(q)
     try:
-        # Send current state immediately on connect so the UI isn't blank.
         if _state is not None:
             await websocket.send_text(_state.snapshot().model_dump_json())
         while True:

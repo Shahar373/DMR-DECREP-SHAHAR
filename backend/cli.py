@@ -161,8 +161,6 @@ def _parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
 
     p.add_argument("--input", default="pulse:dmr_capture.monitor",
                    help="dsd-fme -i input device (live mode, default: %(default)s)")
-    p.add_argument("--audio-out", default="/tmp/dmr_audio.wav",
-                   help="dsd-fme -o WAV output path (live mode, default: %(default)s)")
     p.add_argument("--dsd-bin", default="dsd-fme",
                    help="path to dsd-fme binary (default: %(default)s)")
 
@@ -180,43 +178,21 @@ def _parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
                    help="start FastAPI WebSocket server and browser UI")
     p.add_argument("--port", type=int, default=8080,
                    help="HTTP/WebSocket port when --serve is used (default: %(default)s)")
+    p.add_argument("--calls-dir", default="/tmp/dmr_calls",
+                   help="directory dsd-fme writes per-call WAVs into (default: %(default)s)")
     return p.parse_args(argv)
 
 
 async def _run(args: argparse.Namespace) -> None:
     stop_event = asyncio.Event()
 
-    # ── Per-call recording wiring (needs to exist before StateManager so
-    # the on_call_start / on_call_end callbacks can capture it) ──────
+    calls_dir = Path(args.calls_dir)
     recordings = None
-    _broadcaster = None
     if args.serve:
         from .recordings import RecordingRegistry
-        recordings = RecordingRegistry(Path("/tmp/dmr_calls"))
-        if args.live:
-            from .audio import AudioBroadcaster
-            _broadcaster = AudioBroadcaster()
+        recordings = RecordingRegistry(calls_dir)
 
-    def _on_call_start(call) -> None:
-        if recordings is None:
-            return
-        rec = recordings.start(call)
-        if _broadcaster is not None:
-            _broadcaster.start_recording(rec.id, recordings.file_path(rec.id))
-
-    def _on_call_end(call) -> None:
-        if recordings is None:
-            return
-        if _broadcaster is not None:
-            rec_id = recordings.active_id(call.slot)
-            if rec_id is not None:
-                _broadcaster.stop_recording(rec_id)
-        recordings.end(call.slot, call.last_frame_at)
-
-    state = StateManager(
-        on_call_start=_on_call_start,
-        on_call_end=_on_call_end,
-    )
+    state = StateManager()
     printer = _make_event_printer(state, args.verbose)
     runner = LineRunner(state, on_event=printer)
 
@@ -231,9 +207,6 @@ async def _run(args: argparse.Namespace) -> None:
         srv.attach_state(state)
         if recordings is not None:
             srv.attach_recordings(recordings)
-        if _broadcaster is not None:
-            _broadcaster.start()
-            srv.attach_audio(_broadcaster)
         config = uvicorn.Config(
             srv.app,
             host="0.0.0.0",
@@ -252,19 +225,17 @@ async def _run(args: argparse.Namespace) -> None:
     )
 
     if args.live:
-        import os as _os
-        dsd_env = _os.environ.copy()
-        if _broadcaster is not None:
-            from .audio import AudioBroadcaster as _AB
-            # Route dsd-fme decoded audio to the PulseAudio null sink so
-            # ffmpeg can capture it from the monitor.
-            dsd_env["PULSE_SINK"] = _AB.PULSE_SINK
-            cmd = [args.dsd_bin, "-fs", "-i", args.input]
-        else:
-            cmd = [args.dsd_bin, "-fs", "-i", args.input, "-o", args.audio_out]
-            dsd_env = None  # type: ignore[assignment]
+        # dsd-fme writes per-call WAVs to --calls-dir via `-7 <dir> -P`.
+        # `-7` must come BEFORE `-P` per the dsd-fme help.
+        calls_dir.mkdir(parents=True, exist_ok=True)
+        cmd = [
+            args.dsd_bin, "-fs",
+            "-i", args.input,
+            "-7", str(calls_dir),
+            "-P",
+        ]
         print(f"# starting: {' '.join(cmd)}", file=sys.stderr)
-        source = stream_subprocess(cmd, stop_event=stop_event, env=dsd_env)
+        source = stream_subprocess(cmd, stop_event=stop_event)
     else:
         print(f"# replaying {args.replay} (delay={args.replay_delay}s)", file=sys.stderr)
         source = stream_file(args.replay, delay=args.replay_delay, stop_event=stop_event)
@@ -273,8 +244,6 @@ async def _run(args: argparse.Namespace) -> None:
         await runner.consume_lines(source)
     finally:
         stop_event.set()
-        if _broadcaster:
-            _broadcaster.stop()
         snapshot_path.write_text(state.snapshot().model_dump_json(indent=2))
         snap_task.cancel()
         try:

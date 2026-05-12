@@ -136,7 +136,7 @@ tr.has-gps { cursor: pointer; }
 #history-section {
   border-top: 1px solid var(--border);
   padding: 0;
-  flex: 0 1 40%;
+  flex: 1 1 50%;
   display: flex; flex-direction: column;
   overflow: hidden;
 }
@@ -166,24 +166,6 @@ tr.has-gps { cursor: pointer; }
 }
 .hist-play:hover { border-color: var(--blue); color: var(--blue); }
 #no-history { color: var(--muted); font-size: 11px; padding: 12px; text-align: center; }
-
-/* ── Audio section ──────────────────────────────────────────────── */
-#audio-section {
-  border-top: 1px solid var(--border);
-  padding: 8px 12px;
-  flex-shrink: 0;
-}
-#audio-section h2 { border-bottom: none; padding: 0 0 6px 0; }
-#audio-row { display: flex; align-items: center; gap: 8px; }
-#audio-btn {
-  background: var(--bg3); border: 1px solid var(--border);
-  color: var(--text); border-radius: 4px; padding: 3px 10px;
-  cursor: pointer; font-size: 12px; white-space: nowrap;
-}
-#audio-btn:hover { border-color: var(--blue); color: var(--blue); }
-#audio-btn.playing { border-color: var(--green); color: var(--green); }
-#vol-slider { flex: 1; accent-color: var(--blue); }
-#audio-ind { font-size: 10px; color: var(--muted); white-space: nowrap; }
 
 /* ── Quality footer ─────────────────────────────────────────────── */
 #footer {
@@ -215,21 +197,9 @@ tr.has-gps { cursor: pointer; }
     <h2>Active Calls</h2>
     <div id="calls-list"><div id="no-calls">No active calls</div></div>
     <div id="history-section">
-      <h2>Recent Calls</h2>
+      <h2>Recent Voice Calls</h2>
       <div id="history-list"><div id="no-history">No recordings yet</div></div>
       <audio id="hist-audio-el" preload="none" style="display:none"></audio>
-    </div>
-    <div id="audio-section">
-      <h2>Audio Stream</h2>
-      <div id="audio-row">
-        <button id="audio-btn" onclick="toggleMute()">&#x1F507; Muted</button>
-        <input type="range" id="vol-slider" min="0" max="1" step="0.05" value="0.8"
-               oninput="setAudioVolume(this.value)">
-        <span id="audio-ind">Starting…</span>
-      </div>
-      <audio id="audio-el" autoplay muted preload="auto" style="display:none">
-        <source src="/audio/stream" type="audio/mpeg">
-      </audio>
     </div>
   </div>
 
@@ -556,65 +526,6 @@ setInterval(_pollFallback, 2000);
 // Keep the map from going stale when window is resized.
 window.addEventListener('resize', () => map.invalidateSize());
 
-// ── Audio player ──────────────────────────────────────────────────
-// The stream starts muted immediately on page load.
-// One click on the button unmutes — no need to "remember to press play".
-const audioEl  = document.getElementById('audio-el');
-const audioBtn = document.getElementById('audio-btn');
-const audioInd = document.getElementById('audio-ind');
-let _audioAvail = false;
-
-function _setAudioUI() {
-  if (audioEl.muted) {
-    audioBtn.textContent = '🔇 Muted';
-    audioBtn.className = '';
-    audioInd.textContent = 'Muted (click to hear)';
-    audioInd.style.color = 'var(--muted)';
-  } else {
-    audioBtn.textContent = '🔊 Live';
-    audioBtn.className = 'playing';
-    audioInd.textContent = 'Live';
-    audioInd.style.color = 'var(--green)';
-  }
-}
-
-function setAudioVolume(v) {
-  audioEl.volume = parseFloat(v);
-}
-
-function toggleMute() {
-  if (!_audioAvail) return;
-  if (audioEl.paused) {
-    audioEl.load();
-    audioEl.play().catch(() => {});
-  }
-  audioEl.muted = !audioEl.muted;
-  _setAudioUI();
-}
-
-audioEl.addEventListener('playing', _setAudioUI);
-audioEl.addEventListener('error', () => {
-  audioInd.textContent = 'Reconnecting…';
-  audioInd.style.color = 'var(--yellow)';
-  if (_audioAvail) setTimeout(() => { audioEl.load(); audioEl.play().catch(() => {}); }, 4000);
-});
-
-// Check the server, then start the stream immediately (muted).
-fetch('/audio/status').then(r => r.json()).then(s => {
-  if (!s.available) {
-    audioInd.textContent = 'N/A';
-    audioBtn.disabled = true;
-    return;
-  }
-  _audioAvail = true;
-  audioEl.volume = parseFloat(document.getElementById('vol-slider').value);
-  audioEl.play().catch(() => {});  // autoplay muted — always succeeds
-  _setAudioUI();
-}).catch(() => {
-  audioInd.textContent = 'N/A';
-  audioBtn.disabled = true;
-});
-
 // ── Recent call history ────────────────────────────────────────────
 const histAudio = document.getElementById('hist-audio-el');
 let playingRecId = null;
@@ -631,38 +542,22 @@ function fmtTime(iso) {
   return new Date(iso).toLocaleTimeString('en-GB', { hour12: false });
 }
 
-function playRecording(recId) {
-  if (playingRecId === recId && !histAudio.paused) {
+function playRecording(filename) {
+  if (playingRecId === filename && !histAudio.paused) {
     histAudio.pause();
     playingRecId = null;
     renderHistory(_lastHist);
     return;
   }
-  histAudio.src = `/recordings/${recId}.mp3`;
+  histAudio.src = `/recordings/${encodeURIComponent(filename)}`;
   histAudio.load();
   histAudio.play().then(() => {
-    playingRecId = recId;
+    playingRecId = filename;
     renderHistory(_lastHist);
-  }).catch(err => {
+  }).catch(() => {
     playingRecId = null;
     renderHistory(_lastHist);
-    showHistToast('Playback failed — no audio data yet');
   });
-}
-
-function showHistToast(msg) {
-  let t = document.getElementById('hist-toast');
-  if (!t) {
-    t = document.createElement('div');
-    t.id = 'hist-toast';
-    t.style.cssText = 'position:absolute;bottom:8px;left:50%;transform:translateX(-50%);background:#c0392b;color:#fff;padding:4px 10px;border-radius:4px;font-size:11px;pointer-events:none;z-index:10;';
-    document.getElementById('history-section').style.position = 'relative';
-    document.getElementById('history-section').appendChild(t);
-  }
-  t.textContent = msg;
-  t.style.opacity = '1';
-  clearTimeout(t._tid);
-  t._tid = setTimeout(() => { t.style.opacity = '0'; }, 3000);
 }
 
 histAudio.addEventListener('ended', () => {
@@ -681,13 +576,18 @@ function renderHistory(list) {
   el.innerHTML = '';
   _lastHist.forEach(r => {
     const div = document.createElement('div');
-    div.className = 'hist-card' + (r.is_encrypted ? ' enc' : '') + (r.id === playingRecId ? ' playing' : '');
+    const isPlaying = r.filename === playingRecId;
+    div.className = 'hist-card' + (isPlaying ? ' playing' : '');
+    const src = r.src != null ? r.src : '—';
+    const tg = r.tgt != null ? `TG ${r.tgt}` : 'TG —';
+    const slot = r.slot != null ? ` · slot ${r.slot}` : '';
+    const safeFilename = r.filename.replace(/'/g, "\\'");
     div.innerHTML = `
       <div class="hist-info">
-        <div class="hist-line1">${r.src} → TG ${r.tgt}</div>
-        <div class="hist-line2">${fmtTime(r.started_at)} · ${fmtDuration(r.duration_seconds)} · slot ${r.slot}${r.is_encrypted ? ' · ENC' : ''}</div>
+        <div class="hist-line1">${src} → ${tg}</div>
+        <div class="hist-line2">${fmtTime(r.started_at)} · ${fmtDuration(r.duration_seconds)}${slot}</div>
       </div>
-      <button class="hist-play" onclick="playRecording('${r.id}')">${r.id === playingRecId ? '⏸' : '▶'}</button>
+      <button class="hist-play" onclick="playRecording('${safeFilename}')">${isPlaying ? '⏸' : '▶'}</button>
     `;
     el.appendChild(div);
   });
@@ -698,13 +598,7 @@ async function refreshHistory() {
     const r = await fetch('/api/recordings');
     if (!r.ok) return;
     const data = await r.json();
-    // Only show completed calls with real audio and duration > 0.5s
-    const recs = (data.recordings || []).filter(rec =>
-      rec.ended_at != null &&
-      rec.file_bytes > 0 &&
-      rec.duration_seconds > 0.5
-    );
-    renderHistory(recs);
+    renderHistory(data.recordings || []);
   } catch (_) {}
 }
 refreshHistory();

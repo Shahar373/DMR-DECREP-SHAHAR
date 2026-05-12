@@ -7,13 +7,12 @@ WorkingDirectory=/home/shahar/DMR-DECREP-SHAHAR
 ExecStart=/home/shahar/DMR-DECREP-SHAHAR/.venv/bin/python -m backend.cli \
     --live \
     --input pulse:dmr_capture.monitor \
-    --audio-out /tmp/dmr_audio.wav \
+    --calls-dir /tmp/dmr_calls \
     --serve \
     --port 8080
 Restart=on-failure
 RestartSec=5s
 Environment=PYTHONUNBUFFERED=1
-Environment=PULSE_SINK=dsd_decoded
 
 [Install]
 WantedBy=default.target
