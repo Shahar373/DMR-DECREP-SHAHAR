@@ -94,11 +94,13 @@ class AudioBroadcaster:
 
     async def _run(self) -> None:
         """Spawn ffmpeg, read its stdout, and fan chunks out to subscribers."""
+        # dsd-fme writes raw signed-16-bit PCM at 8000 Hz mono (no WAV header).
         cmd = [
             "ffmpeg",
             "-loglevel", "warning",
-            "-f", "wav",
-            "-fflags", "+discardcorrupt",  # tolerate WAV header size mismatch on FIFO
+            "-f", "s16le",   # raw PCM – what dsd-fme actually writes to the FIFO
+            "-ar", "8000",
+            "-ac", "1",
             "-i", str(FIFO_PATH),
             "-vn",
             "-codec:a", "libmp3lame",

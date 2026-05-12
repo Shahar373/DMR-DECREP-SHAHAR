@@ -682,15 +682,12 @@ function renderHistory(list) {
   _lastHist.forEach(r => {
     const div = document.createElement('div');
     div.className = 'hist-card' + (r.is_encrypted ? ' enc' : '') + (r.id === playingRecId ? ' playing' : '');
-    const live = r.ended_at == null;
-    const empty = !live && (r.file_bytes === 0 || r.file_bytes == null);
-    const btnTitle = live ? 'Call in progress' : (empty ? 'No audio captured' : '');
     div.innerHTML = `
       <div class="hist-info">
         <div class="hist-line1">${r.src} → TG ${r.tgt}</div>
-        <div class="hist-line2">${fmtTime(r.started_at)} · ${live ? '<span style="color:var(--green)">live</span>' : fmtDuration(r.duration_seconds)} · slot ${r.slot}${r.is_encrypted ? ' · ENC' : ''}${empty ? ' · <span style="color:#888">no audio</span>' : ''}</div>
+        <div class="hist-line2">${fmtTime(r.started_at)} · ${fmtDuration(r.duration_seconds)} · slot ${r.slot}${r.is_encrypted ? ' · ENC' : ''}</div>
       </div>
-      <button class="hist-play" ${(live || empty) ? 'disabled' : ''} title="${btnTitle}" onclick="playRecording('${r.id}')">${r.id === playingRecId ? '⏸' : '▶'}</button>
+      <button class="hist-play" onclick="playRecording('${r.id}')">${r.id === playingRecId ? '⏸' : '▶'}</button>
     `;
     el.appendChild(div);
   });
@@ -701,7 +698,13 @@ async function refreshHistory() {
     const r = await fetch('/api/recordings');
     if (!r.ok) return;
     const data = await r.json();
-    renderHistory(data.recordings || []);
+    // Only show completed calls with real audio and duration > 0.5s
+    const recs = (data.recordings || []).filter(rec =>
+      rec.ended_at != null &&
+      rec.file_bytes > 0 &&
+      rec.duration_seconds > 0.5
+    );
+    renderHistory(recs);
   } catch (_) {}
 }
 refreshHistory();
