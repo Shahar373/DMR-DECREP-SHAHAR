@@ -66,7 +66,7 @@ select.header-ctrl { padding-right: 22px; }
 /* ── Main area ──────────────────────────────────────────────────── */
 #main {
   flex: 1; display: grid; overflow: hidden;
-  grid-template-columns: 280px 1fr;
+  grid-template-columns: 320px 1fr;
   grid-template-rows: auto 1fr;
 }
 
@@ -78,8 +78,17 @@ select.header-ctrl { padding-right: 22px; }
 }
 #calls-panel h2 { padding: 8px 12px; font-size: 12px; color: var(--muted);
                   border-bottom: 1px solid var(--border); text-transform: uppercase;
-                  letter-spacing: .05em; flex-shrink: 0; }
-#calls-list { flex: 1; overflow-y: auto; padding: 8px; display: flex; flex-direction: column; gap: 6px; }
+                  letter-spacing: .05em; flex-shrink: 0;
+                  display: flex; align-items: center; gap: 6px; }
+#calls-panel h2 .h2-meta { margin-left: auto; color: var(--muted);
+                           font-size: 10px; font-weight: 400; text-transform: none;
+                           letter-spacing: 0; }
+#calls-list {
+  /* Cap so two other panels below stay visible even with several active calls. */
+  flex: 0 1 auto; max-height: 180px;
+  overflow-y: auto; padding: 8px;
+  display: flex; flex-direction: column; gap: 6px;
+}
 .call-card {
   background: var(--bg3); border: 1px solid var(--border);
   border-left: 3px solid var(--green); border-radius: 6px; padding: 8px 10px;
@@ -145,7 +154,7 @@ tr.has-gps { cursor: pointer; }
 #history-section {
   border-top: 1px solid var(--border);
   padding: 0;
-  flex: 1 1 50%;
+  flex: 1 1 0; min-height: 0;
   display: flex; flex-direction: column;
   overflow: hidden;
 }
@@ -153,6 +162,22 @@ tr.has-gps { cursor: pointer; }
   padding: 8px 12px;
   flex-shrink: 0;
 }
+.hist-filters {
+  padding: 4px 8px; display: flex; gap: 6px; align-items: center;
+  border-bottom: 1px solid var(--border); flex-shrink: 0;
+  font-size: 10px; color: var(--muted);
+}
+.hist-filters input, .hist-filters select {
+  background: var(--bg3); color: var(--text);
+  border: 1px solid var(--border); border-radius: 3px;
+  font-size: 11px; padding: 2px 6px; font-family: inherit;
+}
+.hist-filters input { width: 80px; }
+.hist-filters button {
+  background: var(--bg3); color: var(--muted); border: 1px solid var(--border);
+  border-radius: 3px; padding: 2px 6px; font-size: 10px; cursor: pointer;
+}
+.hist-filters button:hover { color: var(--blue); border-color: var(--blue); }
 #history-list {
   flex: 1; overflow-y: auto; padding: 6px 8px;
   display: flex; flex-direction: column; gap: 4px;
@@ -179,8 +204,8 @@ tr.has-gps { cursor: pointer; }
 /* ── Debrief panel ──────────────────────────────────────────────── */
 #debrief-section {
   border-top: 1px solid var(--border);
-  display: flex; flex-direction: column; min-height: 0;
-  max-height: 38%;
+  display: flex; flex-direction: column;
+  flex: 1 1 0; min-height: 0;
 }
 #debrief-section > h2 {
   padding: 8px 12px; font-size: 12px; color: var(--muted);
@@ -192,25 +217,32 @@ tr.has-gps { cursor: pointer; }
   margin-left: auto;
   background: var(--bg3); color: var(--text);
   border: 1px solid var(--border); border-radius: 3px;
-  font-size: 10px; padding: 1px 4px; text-transform: none;
+  font-size: 11px; padding: 2px 6px; text-transform: none;
 }
 #debrief-list {
-  flex: 1; overflow-y: auto; padding: 4px 6px;
-  display: flex; flex-direction: column; gap: 2px;
-  font-size: 10px; font-family: ui-monospace, monospace;
+  flex: 1; overflow-y: auto; padding: 6px 8px;
+  display: flex; flex-direction: column; gap: 3px;
+  font-size: 12px; font-family: ui-monospace, monospace;
 }
 .dbr-row {
-  padding: 2px 6px; border-radius: 3px;
-  color: var(--muted); white-space: nowrap;
-  overflow: hidden; text-overflow: ellipsis;
+  padding: 3px 6px; border-radius: 3px;
+  color: var(--text);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  line-height: 1.35;
 }
-.dbr-row:hover { background: var(--bg3); color: var(--text); }
-.dbr-time   { color: var(--blue); margin-right: 6px; }
-.dbr-type   { color: var(--yellow); display: inline-block; min-width: 84px; }
+.dbr-row:hover { background: var(--bg3); }
+.dbr-time   { color: var(--blue); margin-right: 8px; }
+.dbr-type   { color: var(--yellow); display: inline-block;
+              min-width: 96px; margin-right: 6px; font-size: 11px; }
+.dbr-desc   { color: var(--text); }
 .dbr-type.voice_call    { color: var(--green); }
 .dbr-type.lrrp_position { color: var(--purple); }
 .dbr-type.encryption    { color: var(--purple); }
 .dbr-type.quality       { color: var(--red); }
+.dbr-type.site_info,
+.dbr-type.channel_status,
+.dbr-type.lsn_status,
+.dbr-type.bank_call     { color: var(--muted); }
 #no-debrief { color: var(--muted); padding: 12px; text-align: center; }
 
 /* ── Quality footer ─────────────────────────────────────────────── */
@@ -251,10 +283,24 @@ tr.has-gps { cursor: pointer; }
 <!-- Main grid: left=calls, right top=map, right bottom=radios -->
 <div id="main">
   <div id="calls-panel">
-    <h2>Active Calls</h2>
+    <h2>Active Calls<span class="h2-meta" id="active-count"></span></h2>
     <div id="calls-list"><div id="no-calls">No active calls</div></div>
     <div id="history-section">
-      <h2>Recent Voice Calls</h2>
+      <h2>Recent Voice Calls<span class="h2-meta" id="hist-count"></span></h2>
+      <div class="hist-filters">
+        <span>Radio</span>
+        <input id="hist-filter-src" type="text" inputmode="numeric"
+               placeholder="any" title="Show only calls from this SRC radio">
+        <span>Min</span>
+        <select id="hist-filter-min" title="Hide calls shorter than this">
+          <option value="0">any</option>
+          <option value="1">≥1s</option>
+          <option value="2" selected>≥2s</option>
+          <option value="3">≥3s</option>
+          <option value="5">≥5s</option>
+        </select>
+        <button id="hist-filter-clear" title="Clear filters">×</button>
+      </div>
       <div id="history-list"><div id="no-history">No recordings yet</div></div>
       <audio id="hist-audio-el" preload="none" style="display:none"></audio>
     </div>
@@ -262,12 +308,14 @@ tr.has-gps { cursor: pointer; }
       <h2>
         Debrief
         <select id="debrief-filter" title="Filter by event type">
-          <option value="">all</option>
+          <option value="voice_call,lrrp_position,encryption,quality" selected>traffic</option>
           <option value="voice_call">voice</option>
           <option value="lrrp_position">positions</option>
           <option value="encryption">encryption</option>
           <option value="quality">errors</option>
-          <option value="data_header,preamble_csbk">data/csbk</option>
+          <option value="data_header,preamble_csbk,ip_mapping">data/csbk</option>
+          <option value="site_info,channel_status,lsn_status,bank_call">control-chan</option>
+          <option value="">all</option>
         </select>
       </h2>
       <div id="debrief-list"><div id="no-debrief">No events yet</div></div>
@@ -471,6 +519,8 @@ function renderLSN(snap) {
 function renderCalls(snap) {
   const list = document.getElementById('calls-list');
   const calls = Object.values(snap.active_calls);
+  const countEl = document.getElementById('active-count');
+  if (countEl) countEl.textContent = calls.length ? `(${calls.length})` : '';
   if (!calls.length) {
     list.innerHTML = '<div id="no-calls">No active calls</div>';
     return;
@@ -664,15 +714,36 @@ histAudio.addEventListener('ended', () => {
 });
 
 let _lastHist = [];
+let _histFilterSrc = null;     // number | null
+let _histFilterMin = 2;        // seconds (matches the default ≥2s)
+
+function _applyHistFilters(list) {
+  return (list || []).filter(r => {
+    if (_histFilterSrc != null && r.src !== _histFilterSrc) return false;
+    if (_histFilterMin > 0 && (r.duration_seconds ?? 0) < _histFilterMin) return false;
+    return true;
+  });
+}
+
 function renderHistory(list) {
   _lastHist = list || [];
+  const filtered = _applyHistFilters(_lastHist);
   const el = document.getElementById('history-list');
-  if (!_lastHist.length) {
-    el.innerHTML = '<div id="no-history">No recordings yet</div>';
+  const countEl = document.getElementById('hist-count');
+  if (countEl) {
+    countEl.textContent = _lastHist.length
+      ? `${filtered.length}/${_lastHist.length}`
+      : '';
+  }
+  if (!filtered.length) {
+    const msg = _lastHist.length
+      ? 'No matches — adjust filters'
+      : 'No recordings yet';
+    el.innerHTML = `<div id="no-history">${msg}</div>`;
     return;
   }
   el.innerHTML = '';
-  _lastHist.forEach(r => {
+  filtered.forEach(r => {
     const div = document.createElement('div');
     const isPlaying = r.filename === playingRecId;
     div.className = 'hist-card' + (isPlaying ? ' playing' : '');
@@ -690,6 +761,25 @@ function renderHistory(list) {
     el.appendChild(div);
   });
 }
+
+// Wire up the Recent-calls filters (radio + minimum duration).
+const histSrcEl = document.getElementById('hist-filter-src');
+const histMinEl = document.getElementById('hist-filter-min');
+const histClearEl = document.getElementById('hist-filter-clear');
+function _readHistFilters() {
+  const sv = histSrcEl.value.trim();
+  _histFilterSrc = sv ? parseInt(sv, 10) : null;
+  if (Number.isNaN(_histFilterSrc)) _histFilterSrc = null;
+  _histFilterMin = parseFloat(histMinEl.value) || 0;
+  renderHistory(_lastHist);
+}
+histSrcEl.addEventListener('input', _readHistFilters);
+histMinEl.addEventListener('change', _readHistFilters);
+histClearEl.addEventListener('click', () => {
+  histSrcEl.value = '';
+  histMinEl.value = '0';
+  _readHistFilters();
+});
 
 async function refreshHistory() {
   try {
@@ -736,10 +826,28 @@ function describeEvent(ev) {
       return `slot${ev.slot} FLCO=${ev.flco} FID=${ev.fid}`;
     case 'site_info':
       return `site=${ev.site} rest_lsn=${ev.rest_lsn}`;
+    case 'channel_status':
+      return `rest_lsn=${ev.rest_lsn} ${ev.block_type}`;
+    case 'lsn_status': {
+      const active = (ev.states || [])
+        .filter(s => s.state === 'Active')
+        .map(s => `LSN${s.lsn}→TG${s.tg}`);
+      const rest = (ev.states || []).filter(s => s.state === 'Rest').map(s => s.lsn);
+      const parts = [];
+      if (active.length) parts.push(active.join(' '));
+      if (rest.length)   parts.push(`rest=${rest.join(',')}`);
+      return parts.join(' · ') || 'all idle';
+    }
+    case 'bank_call': {
+      const lsns = Object.entries(ev.lsn_to_tg || {})
+        .map(([l, tg]) => `LSN${l}→TG${tg}`).join(' ');
+      return `bank=${ev.bank} ${lsns}`;
+    }
     case 'quality':
       return ev.error_type;
     default:
-      return '';
+      // Fallback so an unknown event still shows something readable.
+      return (ev.raw_line || '').trim().slice(0, 80);
   }
 }
 function renderDebrief(events) {
@@ -752,8 +860,10 @@ function renderDebrief(events) {
   const rows = events.slice().reverse().map(ev => {
     const t = new Date(ev.timestamp).toLocaleTimeString('en-GB', { hour12: false });
     const desc = describeEvent(ev);
-    return `<div class="dbr-row"><span class="dbr-time">${t}</span>` +
-           `<span class="dbr-type ${ev.type}">${ev.type}</span> ${desc}</div>`;
+    return `<div class="dbr-row" title="${(ev.raw_line || '').replace(/"/g, '&quot;')}">` +
+           `<span class="dbr-time">${t}</span>` +
+           `<span class="dbr-type ${ev.type}">${ev.type}</span>` +
+           `<span class="dbr-desc">${desc}</span></div>`;
   });
   el.innerHTML = rows.join('');
 }
