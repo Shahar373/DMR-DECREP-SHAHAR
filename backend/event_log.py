@@ -334,7 +334,92 @@ class EventLog:
             "hourly": dict(sorted(hourly.items())),
             "encrypted_calls": encrypted_calls,
             "quality_by_kind": dict(quality_by_kind),
+            "quality_ratios": compute_quality_ratios(dict(by_type), dict(quality_by_kind)),
         }
+
+
+# Verdict thresholds, expressed as decoded-CRC-error rate against successful
+# decodes. Calibrated for a typical Cap+ link where the control channel is
+# the dominant traffic — sub-1% is "I cannot tell this isn't fibre", and
+# above 15% the system is effectively unusable.
+_VERDICT_THRESHOLDS = [
+    (0.01, "excellent", "Strong signal — RF chain is healthy."),
+    (0.03, "good",      "Healthy link. Minor losses are normal in DMR."),
+    (0.10, "marginal",  "Drop in SNR — check antenna placement / cable."),
+    (0.20, "poor",      "Bad SNR — re-aim antenna, add LNA, or move site."),
+    (1.01, "unusable",  "RF chain or site is broken. Most frames are lost."),
+]
+
+
+def _verdict_for(rate: float) -> tuple[str, str]:
+    for threshold, name, hint in _VERDICT_THRESHOLDS:
+        if rate < threshold:
+            return name, hint
+    return "unusable", _VERDICT_THRESHOLDS[-1][2]
+
+
+def compute_quality_ratios(
+    events_by_type: dict[str, int],
+    quality_by_kind: dict[str, int],
+) -> dict[str, object]:
+    """Turn raw counters into error-rate ratios per CSBK/CACH/SLCO channel.
+
+    Denominators are approximate — they're the count of *successful* decodes
+    that came from the same underlying frame class:
+
+      * CSBK frames → site_info + channel_status + preamble_csbk + bank_call
+      * CACH bursts → lsn_status
+      * Voice (SLCO) → voice_call frames
+
+    The errors are the per-kind QualityEvent counters from dsd-fme's own
+    error lines. ratio = errors / (errors + successful_decodes).
+
+    Returned shape (JSON-friendly):
+      {"overall": {errors, decodes, rate, verdict, hint},
+       "csbk_crc": {errors, decodes, rate},
+       "csbk_fec": {...}, "cach_fec": {...}, "slco_crc": {...}}
+    """
+    def _ratio(errs: int, ok: int) -> float:
+        total = errs + ok
+        return (errs / total) if total else 0.0
+
+    csbk_ok = (events_by_type.get("site_info", 0)
+               + events_by_type.get("channel_status", 0)
+               + events_by_type.get("preamble_csbk", 0)
+               + events_by_type.get("bank_call", 0))
+    cach_ok = events_by_type.get("lsn_status", 0)
+    voice_ok = events_by_type.get("voice_call", 0)
+
+    csbk_crc = quality_by_kind.get("CSBK_CRC", 0)
+    csbk_fec = quality_by_kind.get("CSBK_FEC", 0)
+    cach_fec = quality_by_kind.get("CACH_BURST_FEC", 0)
+    slco_crc = quality_by_kind.get("SLCO_CRC", 0)
+
+    # CRC errors mean the FEC failed and the frame was actually lost.
+    # FEC errors mean FEC was needed — a warning indicator, not a loss.
+    # The "overall" verdict uses CRCs only so it reflects lost frames.
+    overall_errs = csbk_crc + slco_crc
+    overall_ok = csbk_ok + voice_ok
+    overall_rate = _ratio(overall_errs, overall_ok)
+    verdict, hint = _verdict_for(overall_rate)
+
+    return {
+        "overall": {
+            "errors": overall_errs,
+            "decodes": overall_ok,
+            "rate": overall_rate,
+            "verdict": verdict,
+            "hint": hint,
+        },
+        "csbk_crc": {"errors": csbk_crc, "decodes": csbk_ok,
+                     "rate": _ratio(csbk_crc, csbk_ok)},
+        "csbk_fec": {"errors": csbk_fec, "decodes": csbk_ok,
+                     "rate": _ratio(csbk_fec, csbk_ok)},
+        "cach_fec": {"errors": cach_fec, "decodes": cach_ok,
+                     "rate": _ratio(cach_fec, cach_ok)},
+        "slco_crc": {"errors": slco_crc, "decodes": voice_ok,
+                     "rate": _ratio(slco_crc, voice_ok)},
+    }
 
 
 def parse_since(value: Optional[str]) -> Optional[datetime]:

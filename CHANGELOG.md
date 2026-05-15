@@ -9,6 +9,27 @@ Versioning follows [Semantic Versioning](https://semver.org/):
 Source of truth: `backend/__init__.py` (`__version__`). The dashboard
 footer shows the running build's version and `/api/version` exposes it.
 
+## [0.7.0] — 2026-05-15
+
+### Added
+- **Quality Analyzer card** on `/stats` — computes real CRC/FEC error
+  *ratios* per channel class (CSBK / CACH / SLCO) so you can tell at a
+  glance whether the SNR is healthy. Big colour-coded overall rate +
+  verdict (excellent / good / marginal / poor / unusable) with a
+  tuning hint. Per-channel table breaks down errors / decoded count /
+  rate, with a heat-bar that fills as the rate climbs.
+- `compute_quality_ratios()` in `event_log.py` — pure function that
+  takes counters and returns the JSON shape the UI renders. The
+  denominators are the count of *successfully decoded* frames of the
+  same class (CSBK successes for CSBK errors, voice frames for SLCO
+  CRC, etc.), so the ratio is meaningful regardless of how busy the
+  channel is.
+- `/api/stats` response now includes a `quality_ratios` block.
+
+### Changed
+- The big stats grid auto-fits, but the new Quality Analyzer card
+  spans 2 columns so it's the visual focal point on `/stats`.
+
 ## [0.6.0] — 2026-05-15
 
 ### Added

@@ -49,6 +49,48 @@ main { padding: 16px; display: grid; gap: 16px;
 .kv-row .k { color: var(--muted); }
 .kv-row .v { color: var(--text); font-weight: 600; }
 .empty { color: var(--muted); text-align: center; padding: 30px; }
+
+/* Quality Analyzer — visually prominent so RF tuning is at-a-glance. */
+.card.quality { grid-column: span 2; }
+.q-headline {
+  display: flex; align-items: center; gap: 16px; margin-bottom: 12px;
+  flex-wrap: wrap;
+}
+.q-big {
+  font-size: 36px; font-weight: 700; font-family: ui-monospace, monospace;
+  line-height: 1;
+}
+.q-verdict {
+  display: inline-block; padding: 4px 12px; border-radius: 4px;
+  font-size: 12px; font-weight: 700; text-transform: uppercase;
+  letter-spacing: .05em; border: 1px solid;
+}
+.q-verdict.excellent { color: #56d364; border-color: #56d364; background: #1a2f1e; }
+.q-verdict.good      { color: var(--green);  border-color: var(--green);  background: #1a2f1e; }
+.q-verdict.marginal  { color: var(--yellow); border-color: var(--yellow); background: #2a2520; }
+.q-verdict.poor      { color: #ff7b72; border-color: #ff7b72; background: #2a1a1c; }
+.q-verdict.unusable  { color: var(--red);    border-color: var(--red);    background: #2a1a1c; }
+.q-hint { color: var(--muted); font-size: 11px; flex: 1; min-width: 200px; }
+.q-table { width: 100%; border-collapse: collapse; font-size: 11px;
+           font-family: ui-monospace, monospace; }
+.q-table th {
+  text-align: left; padding: 6px 8px; color: var(--muted);
+  text-transform: uppercase; letter-spacing: .05em; font-size: 10px;
+  border-bottom: 1px solid var(--border);
+}
+.q-table td { padding: 5px 8px; border-bottom: 1px solid var(--border); }
+.q-table tr:last-child td { border-bottom: none; }
+.q-table .num { text-align: right; }
+.q-bar {
+  display: inline-block; vertical-align: middle;
+  height: 6px; border-radius: 3px; background: var(--bg3);
+  width: 80px; margin-right: 6px; overflow: hidden;
+}
+.q-bar > i {
+  display: block; height: 100%;
+  background: linear-gradient(90deg, #3fb950 0%, #d29922 60%, #f85149 100%);
+}
+.q-meta { color: var(--muted); font-size: 10px; }
 </style>
 </head>
 <body>
@@ -69,6 +111,28 @@ main { padding: 16px; display: grid; gap: 16px;
 </header>
 
 <main>
+  <div class="card quality">
+    <h2>Quality Analyzer — RF link health</h2>
+    <div class="q-headline">
+      <div>
+        <div class="q-big" id="q-rate">—</div>
+        <div class="q-meta">overall CRC error rate (lost frames)</div>
+      </div>
+      <div class="q-verdict" id="q-verdict">—</div>
+      <div class="q-hint" id="q-hint">Use this to tune antenna height / gain — lower is better.</div>
+    </div>
+    <table class="q-table">
+      <thead>
+        <tr>
+          <th style="width:18%">Channel</th>
+          <th style="width:14%" class="num">Errors</th>
+          <th style="width:14%" class="num">Decoded</th>
+          <th>Rate</th>
+        </tr>
+      </thead>
+      <tbody id="q-tbody"></tbody>
+    </table>
+  </div>
   <div class="card">
     <h2>Events by type <span class="total" id="t-events">—</span></h2>
     <div class="chart-wrap"><canvas id="c-types"></canvas></div>
@@ -168,6 +232,60 @@ charts.src   = makeBar('c-src');
 charts.tg    = makeBar('c-tg');
 charts.hour  = makeBar('c-hour', { indexAxis: 'x' });
 
+function fmtPct(rate) {
+  if (!Number.isFinite(rate)) return '—';
+  if (rate === 0)   return '0.000%';
+  if (rate < 0.001) return (rate * 1000).toFixed(2) + '‰';
+  return (rate * 100).toFixed(2) + '%';
+}
+
+function renderQuality(qr) {
+  if (!qr || !qr.overall) {
+    document.getElementById('q-rate').textContent = '—';
+    document.getElementById('q-verdict').textContent = 'no data';
+    document.getElementById('q-verdict').className = 'q-verdict';
+    document.getElementById('q-hint').textContent =
+      'Waiting for control-channel traffic to build statistics…';
+    document.getElementById('q-tbody').innerHTML = '';
+    return;
+  }
+  const o = qr.overall;
+  const rateEl = document.getElementById('q-rate');
+  rateEl.textContent = fmtPct(o.rate);
+  // Colour the big number to match verdict.
+  const verdictColor = {
+    excellent: '#56d364', good: '#3fb950', marginal: '#d29922',
+    poor: '#ff7b72', unusable: '#f85149',
+  }[o.verdict] || '#e6edf3';
+  rateEl.style.color = verdictColor;
+
+  const vEl = document.getElementById('q-verdict');
+  vEl.textContent = o.verdict;
+  vEl.className = 'q-verdict ' + o.verdict;
+  document.getElementById('q-hint').textContent = o.hint || '';
+
+  const rows = [
+    ['CSBK CRC',  qr.csbk_crc, 'lost control frames'],
+    ['CSBK FEC',  qr.csbk_fec, 'FEC needed on control (SNR warning)'],
+    ['CACH FEC',  qr.cach_fec, 'FEC needed on common-announce burst'],
+    ['SLCO CRC',  qr.slco_crc, 'lost voice slow-LC (talker ID)'],
+  ];
+  const tbody = document.getElementById('q-tbody');
+  tbody.innerHTML = rows.map(([label, r, note]) => {
+    const pct = Math.min(1, (r.rate || 0) * 5).toFixed(3);  // visual: 20% rate fills bar
+    return `
+      <tr>
+        <td>${label}<br><span class="q-meta">${note}</span></td>
+        <td class="num">${r.errors.toLocaleString()}</td>
+        <td class="num">${r.decodes.toLocaleString()}</td>
+        <td>
+          <span class="q-bar"><i style="width:${pct * 100}%"></i></span>
+          <strong>${fmtPct(r.rate)}</strong>
+        </td>
+      </tr>`;
+  }).join('');
+}
+
 async function refresh() {
   let s;
   try {
@@ -175,6 +293,8 @@ async function refresh() {
     if (!r.ok) return;
     s = await r.json();
   } catch (_) { return; }
+
+  renderQuality(s.quality_ratios);
 
   document.getElementById('m-window').textContent =
     `${s.window_size}/${s.window_capacity}`;

@@ -197,6 +197,73 @@ def test_iter_history_csv_emits_header_and_filtered_rows(tmp_path: Path) -> None
     assert "CSBK_CRC" in lines[1]
 
 
+def test_compute_quality_ratios_empty_window_returns_zero_rates() -> None:
+    from backend.event_log import compute_quality_ratios
+    qr = compute_quality_ratios({}, {})
+    assert qr["overall"]["rate"] == 0.0
+    assert qr["overall"]["verdict"] == "excellent"
+    assert qr["csbk_crc"]["rate"] == 0.0
+
+
+def test_compute_quality_ratios_typical_link() -> None:
+    """A healthy Cap+ link: 99 CSBK decodes, 1 CRC error → ~1%."""
+    from backend.event_log import compute_quality_ratios
+    by_type = {
+        "channel_status": 80, "lsn_status": 80, "site_info": 10,
+        "preamble_csbk": 5, "bank_call": 4, "voice_call": 100,
+    }
+    quality = {"CSBK_CRC": 1, "CACH_BURST_FEC": 3, "SLCO_CRC": 2, "CSBK_FEC": 5}
+    qr = compute_quality_ratios(by_type, quality)
+
+    # CSBK denominator = 80 + 10 + 5 + 4 = 99 successes
+    assert qr["csbk_crc"]["decodes"] == 99
+    assert abs(qr["csbk_crc"]["rate"] - 1 / 100) < 1e-9
+
+    # CACH denominator = 80 lsn_status
+    assert qr["cach_fec"]["decodes"] == 80
+    assert abs(qr["cach_fec"]["rate"] - 3 / 83) < 1e-9
+
+    # SLCO denominator = 100 voice_call
+    assert qr["slco_crc"]["decodes"] == 100
+    assert abs(qr["slco_crc"]["rate"] - 2 / 102) < 1e-9
+
+    # Overall uses CRC errors (1 + 2) over CSBK + voice successes (99 + 100).
+    expected_overall = 3 / (3 + 199)
+    assert abs(qr["overall"]["rate"] - expected_overall) < 1e-9
+    # ~1.5% → marginal verdict band.
+    assert qr["overall"]["verdict"] in {"good", "marginal"}
+
+
+def test_compute_quality_ratios_verdict_thresholds() -> None:
+    """Verdicts walk through excellent → good → marginal → poor → unusable."""
+    from backend.event_log import compute_quality_ratios
+
+    # 100% successful = excellent.
+    qr = compute_quality_ratios({"channel_status": 1000}, {})
+    assert qr["overall"]["verdict"] == "excellent"
+
+    # 5% CRC error rate → marginal.
+    qr = compute_quality_ratios({"channel_status": 95}, {"CSBK_CRC": 5})
+    assert 0.04 < qr["overall"]["rate"] < 0.06
+    assert qr["overall"]["verdict"] == "marginal"
+
+    # 50% error rate → unusable.
+    qr = compute_quality_ratios({"channel_status": 50}, {"CSBK_CRC": 50})
+    assert qr["overall"]["verdict"] == "unusable"
+
+
+def test_stats_includes_quality_ratios_block(tmp_path: Path) -> None:
+    log = EventLog(jsonl_path=None, capacity=100)
+    log.append(_voice(0, 101, 9))
+    log.append(QualityEvent(timestamp=_ts(5), raw_line="x", error_type="CSBK_CRC"))
+    s = log.stats()
+    assert "quality_ratios" in s
+    assert s["quality_ratios"]["overall"]["errors"] == 1
+    # CSBK denominator is 0 here (no control-channel events were ingested), so
+    # the rate falls back to 0 to avoid div-by-zero.
+    assert s["quality_ratios"]["csbk_crc"]["decodes"] == 0
+
+
 def test_parse_since_accepts_duration_and_iso() -> None:
     assert parse_since(None) is None
     assert parse_since("") is None
