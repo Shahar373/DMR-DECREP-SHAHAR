@@ -151,10 +151,12 @@ def _print_summary(state: StateManager) -> None:
 
 
 def _parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
+    from . import __version__
     p = argparse.ArgumentParser(
         prog="dmr-monitor",
-        description="DMR Cap+ live monitor (Phase 4a — FastAPI + WebSocket UI).",
+        description="DMR Cap+ live monitor.",
     )
+    p.add_argument("--version", action="version", version=f"dmr-monitor {__version__}")
     mode = p.add_mutually_exclusive_group(required=True)
     mode.add_argument("--live", action="store_true", help="spawn dsd-fme and stream live")
     mode.add_argument("--replay", metavar="FILE", help="replay a captured dsd-fme stderr log")
@@ -188,6 +190,9 @@ def _parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
 
 
 async def _run(args: argparse.Namespace) -> None:
+    from . import __build_date__, __version__
+    print(f"# dmr-monitor v{__version__} (build {__build_date__})", file=sys.stderr)
+
     stop_event = asyncio.Event()
 
     calls_dir = Path(args.calls_dir)

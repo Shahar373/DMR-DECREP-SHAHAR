@@ -17,6 +17,7 @@ from typing import Optional
 from fastapi import FastAPI, Query, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, HTMLResponse, Response, StreamingResponse
 
+from . import __build_date__, __version__
 from .event_log import EventLog, parse_since
 from .recordings import RecordingRegistry
 from .state import StateManager
@@ -93,6 +94,11 @@ async def debug_info():
         "files_on_disk": files_on_disk[:50],  # cap output
         "recordings": [r.model_dump(mode="json") for r in recs[:20]],
     }
+
+
+@app.get("/api/version")
+async def get_version():
+    return {"version": __version__, "build_date": __build_date__}
 
 
 @app.get("/api/events")

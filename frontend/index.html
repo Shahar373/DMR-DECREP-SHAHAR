@@ -252,6 +252,11 @@ tr.has-gps { cursor: pointer; }
   font-size: 11px; color: var(--muted);
 }
 #footer span { color: var(--text); }
+#version-tag {
+  color: var(--blue); font-weight: 600;
+  padding: 0 6px; border-left: 1px solid var(--border);
+  margin-left: 8px;
+}
 </style>
 </head>
 <body>
@@ -354,6 +359,7 @@ tr.has-gps { cursor: pointer; }
   <div>SLCO CRC: <span id="q-slco-crc">0</span></div>
   <div>Events: <span id="q-total">0</span></div>
   <div style="margin-left:auto">Updated: <span id="q-ts">—</span></div>
+  <div id="version-tag" title="App version">v—</div>
 </div>
 
 <script>
@@ -804,6 +810,14 @@ document.getElementById('export-csv').addEventListener('click', () => {
   // Plain navigation triggers the browser's download for attachment responses.
   window.location.href = '/api/events.csv';
 });
+
+// ── Version tag (fetched once on load) ─────────────────────────────
+fetch('/api/version').then(r => r.ok ? r.json() : null).then(v => {
+  if (!v || !v.version) return;
+  const el = document.getElementById('version-tag');
+  el.textContent = 'v' + v.version;
+  el.title = `Build ${v.build_date}`;
+}).catch(() => {});
 
 // ── Debrief panel ──────────────────────────────────────────────────
 const debriefSel = document.getElementById('debrief-filter');

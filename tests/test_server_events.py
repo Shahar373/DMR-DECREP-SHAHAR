@@ -34,6 +34,18 @@ def client():
     return TestClient(srv.app)
 
 
+def test_version_endpoint(client):
+    from backend import __build_date__, __version__
+    r = client.get("/api/version")
+    assert r.status_code == 200
+    data = r.json()
+    assert data["version"] == __version__
+    assert data["build_date"] == __build_date__
+    # Sanity: semver-ish "X.Y.Z"
+    parts = data["version"].split(".")
+    assert len(parts) == 3 and all(p.isdigit() for p in parts)
+
+
 def test_events_endpoint_returns_buffered_events(client):
     r = client.get("/api/events")
     assert r.status_code == 200
