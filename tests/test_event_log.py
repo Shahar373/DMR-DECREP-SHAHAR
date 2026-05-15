@@ -128,6 +128,75 @@ def test_voice_src_zero_is_excluded_from_call_stats() -> None:
     assert s["calls_by_src"][101] == 1
 
 
+def test_stream_history_filters_by_time_type_and_radio(tmp_path: Path) -> None:
+    log_path = tmp_path / "events.jsonl"
+    log = EventLog(jsonl_path=log_path, capacity=100)
+    log.append(_voice(0, 101, 9))
+    log.append(_voice(5, 102, 9))
+    log.append(LRRPPositionEvent(
+        timestamp=_ts(10), raw_line="pos", src=101, lat=32.0, lon=34.0,
+    ))
+    log.append(QualityEvent(timestamp=_ts(15), raw_line="q", error_type="CSBK_CRC"))
+    log.append(_voice(20, 101, 7))
+    log.close()
+
+    from backend.event_log import stream_history
+
+    # No filter — yields every line.
+    all_evs = list(stream_history(log_path))
+    assert len(all_evs) == 5
+
+    # Filter by type.
+    voices = list(stream_history(log_path, types=["voice_call"]))
+    assert [e["src"] for e in voices] == [101, 102, 101]
+
+    # Filter by SRC radio.
+    by_radio = list(stream_history(log_path, src=101))
+    # voice(0,101,9), lrrp_position(src=101), voice(20,101,7)
+    assert len(by_radio) == 3
+
+    # Filter by target talkgroup.
+    by_tg = list(stream_history(log_path, tgt=9))
+    assert len(by_tg) == 2
+
+    # Filter by time window — only events within [_ts(7), _ts(16)].
+    in_window = list(stream_history(log_path, since=_ts(7), until=_ts(16)))
+    assert [e["type"] for e in in_window] == ["lrrp_position", "quality"]
+
+
+def test_stream_history_skips_malformed_lines(tmp_path: Path) -> None:
+    log_path = tmp_path / "events.jsonl"
+    # Hand-craft a file with garbage interleaved with valid lines.
+    log_path.write_text(
+        '{"timestamp":"2026-01-01T00:00:00","type":"quality","raw_line":"x","error_type":"CSBK_CRC"}\n'
+        'this is not json at all\n'
+        '\n'
+        '{"timestamp":"bad","type":"quality","raw_line":"x","error_type":"X"}\n'
+        '{"timestamp":"2026-01-01T00:00:01","type":"quality","raw_line":"x","error_type":"SLCO_CRC"}\n',
+        encoding="utf-8",
+    )
+    from backend.event_log import stream_history
+    out = list(stream_history(log_path))
+    # Only the two well-formed events with parseable timestamps survive.
+    assert [o["error_type"] for o in out] == ["CSBK_CRC", "SLCO_CRC"]
+
+
+def test_iter_history_csv_emits_header_and_filtered_rows(tmp_path: Path) -> None:
+    log_path = tmp_path / "events.jsonl"
+    log = EventLog(jsonl_path=log_path, capacity=100)
+    log.append(_voice(0, 101, 9))
+    log.append(QualityEvent(timestamp=_ts(5), raw_line="x", error_type="CSBK_CRC"))
+    log.close()
+
+    from backend.event_log import iter_history_csv
+
+    csv_text = "".join(iter_history_csv(log_path, types=["quality"]))
+    lines = csv_text.strip().splitlines()
+    assert len(lines) == 2  # header + 1 quality row
+    assert lines[0].startswith("timestamp,type")
+    assert "CSBK_CRC" in lines[1]
+
+
 def test_parse_since_accepts_duration_and_iso() -> None:
     assert parse_since(None) is None
     assert parse_since("") is None

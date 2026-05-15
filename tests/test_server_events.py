@@ -92,3 +92,87 @@ def test_stats_endpoint(client):
     assert s["events_by_type"]["voice_call"] == 2
     assert s["calls_by_src"]["101"] == 1
     assert s["calls_by_tg"]["9"] == 2
+
+
+# ---------------------------------------------------------------------------
+# Historical /api/history endpoint — backed by the on-disk JSONL file.
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def history_client(tmp_path):
+    """A client whose EventLog is bound to a real on-disk JSONL file."""
+    state = StateManager()
+    log_path = tmp_path / "events.jsonl"
+    log = EventLog(jsonl_path=log_path, capacity=100)
+    log.append(_voice(0, 101, 9))
+    log.append(_voice(5, 102, 9))
+    log.append(QualityEvent(
+        timestamp=datetime(2026, 5, 10, 21, 0, 10),
+        raw_line="x", error_type="CSBK_CRC",
+    ))
+    log.append(_voice(20, 101, 7))
+    log.close()
+    # Re-open in append-only mode so the server has a path attached, but
+    # we stop appending — the file already has all the test data.
+    log2 = EventLog(jsonl_path=log_path, capacity=100)
+    srv.attach_state(state)
+    srv.attach_event_log(log2)
+    return TestClient(srv.app)
+
+
+def test_history_endpoint_returns_persisted_events(history_client):
+    r = history_client.get("/api/history?limit=100")
+    assert r.status_code == 200
+    data = r.json()
+    assert len(data["events"]) == 4
+    assert data["truncated"] is False
+    assert data["events"][0]["src"] == 101
+
+
+def test_history_endpoint_filters_by_radio(history_client):
+    r = history_client.get("/api/history?src=101")
+    events = r.json()["events"]
+    # voice(0,101,9) and voice(20,101,7) — quality has no src field.
+    assert len(events) == 2
+    assert {e["tgt"] for e in events} == {9, 7}
+
+
+def test_history_endpoint_filters_by_target(history_client):
+    r = history_client.get("/api/history?tgt=9")
+    events = r.json()["events"]
+    assert len(events) == 2
+
+
+def test_history_endpoint_filters_by_type(history_client):
+    r = history_client.get("/api/history?types=quality")
+    events = r.json()["events"]
+    assert len(events) == 1
+    assert events[0]["error_type"] == "CSBK_CRC"
+
+
+def test_history_endpoint_paginates_with_offset_and_limit(history_client):
+    r = history_client.get("/api/history?limit=2&offset=0")
+    page1 = r.json()
+    assert len(page1["events"]) == 2
+    assert page1["truncated"] is True
+
+    r = history_client.get("/api/history?limit=2&offset=2")
+    page2 = r.json()
+    assert len(page2["events"]) == 2
+    assert page2["truncated"] is False
+    # Pages don't overlap.
+    p1_ts = {e["timestamp"] for e in page1["events"]}
+    p2_ts = {e["timestamp"] for e in page2["events"]}
+    assert p1_ts.isdisjoint(p2_ts)
+
+
+def test_history_csv_export(history_client):
+    r = history_client.get("/api/history.csv?types=voice_call")
+    assert r.status_code == 200
+    assert r.headers["content-type"].startswith("text/csv")
+    assert "attachment" in r.headers["content-disposition"]
+    lines = r.text.strip().splitlines()
+    # header + 3 voice_call rows
+    assert len(lines) == 4
+    assert lines[0].startswith("timestamp,type")

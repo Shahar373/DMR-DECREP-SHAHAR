@@ -51,56 +51,140 @@ CSV_COLUMNS = [
 ]
 
 
+def _row_from_dict(obj: dict) -> dict[str, object]:
+    """Flatten a JSON-serialised event dict into a CSV row dict.
+
+    Used by both the live-buffer CSV export and the on-disk history export
+    so the column shape stays identical.
+    """
+    row: dict[str, object] = {k: "" for k in CSV_COLUMNS}
+    ts = obj.get("timestamp", "")
+    if isinstance(ts, str) and "T" in ts:
+        row["timestamp"] = ts.split(".")[0]  # drop sub-seconds for readability
+    else:
+        row["timestamp"] = ts
+    row["type"] = obj.get("type", "")
+    raw = (obj.get("raw_line") or "")
+    if isinstance(raw, str):
+        raw = raw.strip().replace("\n", " ").replace("\r", " ")
+    row["raw_line"] = raw[:240] if isinstance(raw, str) else ""
+
+    et = obj.get("type")
+    if et == "voice_call":
+        row["slot"] = obj.get("slot", "")
+        row["src"] = obj.get("src", "")
+        row["tgt"] = obj.get("tgt", "")
+        if obj.get("rest_lsn") is not None:
+            row["rest_lsn"] = obj["rest_lsn"]
+    elif et == "preamble_csbk":
+        row["src"] = obj.get("src", "")
+        row["tgt"] = obj.get("tgt", "")
+        row["addressing"] = obj.get("addressing", "")
+        row["kind"] = obj.get("kind", "")
+        if obj.get("rest_lsn") is not None:
+            row["rest_lsn"] = obj["rest_lsn"]
+    elif et == "data_header":
+        row["slot"] = obj.get("slot", "")
+        row["src"] = obj.get("src", "")
+        row["tgt"] = obj.get("tgt", "")
+        row["addressing"] = obj.get("addressing", "")
+        row["delivery"] = obj.get("delivery", "")
+    elif et == "ip_mapping":
+        row["src"] = obj.get("radio_id", "")
+        row["ip"] = obj.get("ip", "")
+        row["port"] = obj.get("port", "")
+    elif et == "lrrp_position":
+        if obj.get("src") is not None:
+            row["src"] = obj["src"]
+        row["lat"] = obj.get("lat", "")
+        row["lon"] = obj.get("lon", "")
+    elif et == "lrrp_request":
+        row["src"] = obj.get("src", "")
+        row["tgt"] = obj.get("tgt", "")
+        row["kind"] = obj.get("direction", "")
+    elif et == "encryption":
+        row["slot"] = obj.get("slot", "")
+        row["encrypted"] = "true"
+    elif et == "site_info":
+        row["site"] = obj.get("site", "")
+        row["rest_lsn"] = obj.get("rest_lsn", "")
+    elif et == "channel_status":
+        row["rest_lsn"] = obj.get("rest_lsn", "")
+    elif et == "quality":
+        row["error_type"] = obj.get("error_type", "")
+    return row
+
+
 def _row_from_event(ev: Event) -> dict[str, object]:
     """Flatten an Event into a CSV row dict using CSV_COLUMNS keys."""
-    row: dict[str, object] = {k: "" for k in CSV_COLUMNS}
-    row["timestamp"] = ev.timestamp.isoformat(timespec="seconds")
-    row["type"] = ev.type.value
-    raw = (ev.raw_line or "").strip().replace("\n", " ").replace("\r", " ")
-    # Cap raw_line to keep CSV readable in spreadsheet apps.
-    row["raw_line"] = raw[:240]
+    return _row_from_dict(ev.model_dump(mode="json"))
 
-    et = ev.type
-    if et == EventType.VOICE_CALL:
-        row["slot"] = ev.slot
-        row["src"] = ev.src
-        row["tgt"] = ev.tgt
-        row["rest_lsn"] = ev.rest_lsn if ev.rest_lsn is not None else ""
-    elif et == EventType.PREAMBLE_CSBK:
-        row["src"] = ev.src
-        row["tgt"] = ev.tgt
-        row["addressing"] = ev.addressing
-        row["kind"] = ev.kind
-        row["rest_lsn"] = ev.rest_lsn if ev.rest_lsn is not None else ""
-    elif et == EventType.DATA_HEADER:
-        row["slot"] = ev.slot
-        row["src"] = ev.src
-        row["tgt"] = ev.tgt
-        row["addressing"] = ev.addressing
-        row["delivery"] = ev.delivery
-    elif et == EventType.IP_MAPPING:
-        row["src"] = ev.radio_id
-        row["ip"] = ev.ip
-        row["port"] = ev.port
-    elif et == EventType.LRRP_POSITION:
-        row["src"] = ev.src if ev.src is not None else ""
-        row["lat"] = ev.lat
-        row["lon"] = ev.lon
-    elif et == EventType.LRRP_REQUEST:
-        row["src"] = ev.src
-        row["tgt"] = ev.tgt
-        row["kind"] = ev.direction
-    elif et == EventType.ENCRYPTION:
-        row["slot"] = ev.slot
-        row["encrypted"] = "true"
-    elif et == EventType.SITE_INFO:
-        row["site"] = ev.site
-        row["rest_lsn"] = ev.rest_lsn
-    elif et == EventType.CHANNEL_STATUS:
-        row["rest_lsn"] = ev.rest_lsn
-    elif et == EventType.QUALITY:
-        row["error_type"] = ev.error_type
-    return row
+
+def stream_history(
+    jsonl_path: Optional[Path],
+    since: Optional[datetime] = None,
+    until: Optional[datetime] = None,
+    src: Optional[int] = None,
+    tgt: Optional[int] = None,
+    types: Optional[Iterable[str]] = None,
+) -> Iterator[dict]:
+    """Stream parsed event dicts from a JSONL file with server-side filtering.
+
+    Designed for the /debrief browser: the file may grow unbounded, so we
+    iterate line-by-line without loading it all into memory. Malformed
+    lines (e.g. a half-written tail line during live append) are silently
+    skipped.
+    """
+    if jsonl_path is None or not jsonl_path.exists():
+        return
+    type_set = {str(t) for t in types} if types else None
+    with open(jsonl_path, "r", encoding="utf-8", errors="replace") as f:
+        for raw in f:
+            raw = raw.strip()
+            if not raw:
+                continue
+            try:
+                obj = json.loads(raw)
+            except json.JSONDecodeError:
+                continue
+            ts_str = obj.get("timestamp")
+            if not ts_str:
+                continue
+            try:
+                ts = datetime.fromisoformat(ts_str)
+            except (TypeError, ValueError):
+                continue
+            if since is not None and ts < since:
+                continue
+            if until is not None and ts > until:
+                continue
+            if type_set is not None and obj.get("type") not in type_set:
+                continue
+            if src is not None:
+                row_src = obj.get("src")
+                if row_src is None:
+                    row_src = obj.get("radio_id")
+                if row_src != src:
+                    continue
+            if tgt is not None and obj.get("tgt") != tgt:
+                continue
+            yield obj
+
+
+def iter_history_csv(
+    jsonl_path: Optional[Path],
+    **filters,
+) -> Iterator[str]:
+    """Yield CSV lines (header + filtered rows) from a JSONL history file."""
+    buf = io.StringIO()
+    writer = csv.DictWriter(buf, fieldnames=CSV_COLUMNS, extrasaction="ignore")
+    writer.writeheader()
+    yield buf.getvalue()
+    buf.seek(0); buf.truncate()
+    for obj in stream_history(jsonl_path, **filters):
+        writer.writerow(_row_from_dict(obj))
+        yield buf.getvalue()
+        buf.seek(0); buf.truncate()
 
 
 class EventLog:

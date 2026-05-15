@@ -18,7 +18,7 @@ from fastapi import FastAPI, Query, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, HTMLResponse, Response, StreamingResponse
 
 from . import __build_date__, __version__
-from .event_log import EventLog, parse_since
+from .event_log import EventLog, iter_history_csv, parse_since, stream_history
 from .recordings import RecordingRegistry
 from .state import StateManager
 
@@ -139,6 +139,82 @@ async def event_stats():
     if _event_log is None:
         return {}
     return _event_log.stats()
+
+
+def _history_filters(since, until, src, tgt, types):
+    type_list = [t.strip() for t in types.split(",") if t.strip()] if types else None
+    return {
+        "since": parse_since(since),
+        "until": parse_since(until),
+        "src": src,
+        "tgt": tgt,
+        "types": type_list,
+    }
+
+
+@app.get("/api/history")
+async def history(
+    since: Optional[str] = Query(None, description="ISO timestamp or duration like '1h'"),
+    until: Optional[str] = Query(None, description="ISO timestamp"),
+    src: Optional[int] = Query(None, description="Filter by source radio id"),
+    tgt: Optional[int] = Query(None, description="Filter by talkgroup / target id"),
+    types: Optional[str] = Query(None, description="Comma-separated EventType values"),
+    limit: int = Query(1000, ge=1, le=20000),
+    offset: int = Query(0, ge=0),
+):
+    """Read events from the on-disk JSONL with server-side filtering.
+
+    Unlike /api/events (which only sees the in-memory ring buffer), this
+    walks the persisted history file so the debrief browser can query
+    older events from previous sessions.
+    """
+    path = _event_log.jsonl_path if _event_log is not None else None
+    if path is None:
+        return {"events": [], "limit": limit, "offset": offset, "truncated": False}
+    filters = _history_filters(since, until, src, tgt, types)
+    out: list[dict] = []
+    skipped = 0
+    truncated = False
+    for obj in stream_history(path, **filters):
+        if skipped < offset:
+            skipped += 1
+            continue
+        if len(out) >= limit:
+            truncated = True
+            break
+        out.append(obj)
+    return {"events": out, "limit": limit, "offset": offset, "truncated": truncated}
+
+
+@app.get("/api/history.csv")
+async def history_csv(
+    since: Optional[str] = Query(None),
+    until: Optional[str] = Query(None),
+    src: Optional[int] = Query(None),
+    tgt: Optional[int] = Query(None),
+    types: Optional[str] = Query(None),
+):
+    path = _event_log.jsonl_path if _event_log is not None else None
+    if path is None:
+        return Response("", media_type="text/csv")
+    filters = _history_filters(since, until, src, tgt, types)
+    iterator = iter_history_csv(path, **filters)
+    fname = f"dmr_history_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+    return StreamingResponse(
+        iterator,
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="{fname}"'},
+    )
+
+
+@app.get("/stats")
+async def stats_page():
+    return HTMLResponse((FRONTEND_DIR / "stats.html").read_text(encoding="utf-8"))
+
+
+@app.get("/debrief")
+async def debrief_page():
+    return HTMLResponse((FRONTEND_DIR / "debrief.html").read_text(encoding="utf-8"))
 
 
 @app.get("/recordings/{filename}")

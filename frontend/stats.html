@@ -1,0 +1,227 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>DMR Cap+ — Statistics</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+:root {
+  --bg: #0d1117; --bg2: #161b22; --bg3: #21262d; --border: #30363d;
+  --text: #e6edf3; --muted: #8b949e;
+  --green: #3fb950; --blue: #58a6ff; --yellow: #d29922;
+  --red: #f85149; --purple: #bc8cff;
+}
+body { font-family: ui-monospace, 'Cascadia Code', monospace;
+       background: var(--bg); color: var(--text); font-size: 13px;
+       min-height: 100vh; }
+header {
+  background: var(--bg2); border-bottom: 1px solid var(--border);
+  padding: 10px 16px; display: flex; align-items: center; gap: 16px;
+}
+header h1 { font-size: 14px; font-weight: 700; color: var(--blue); }
+header .nav a {
+  color: var(--muted); text-decoration: none; margin-right: 12px; font-size: 12px;
+}
+header .nav a:hover, header .nav a.active { color: var(--blue); }
+header .meta { margin-left: auto; color: var(--muted); font-size: 11px; }
+header .meta span { color: var(--text); }
+main { padding: 16px; display: grid; gap: 16px;
+       grid-template-columns: repeat(auto-fit, minmax(420px, 1fr)); }
+.card {
+  background: var(--bg2); border: 1px solid var(--border); border-radius: 6px;
+  padding: 12px 14px; display: flex; flex-direction: column;
+}
+.card h2 {
+  font-size: 11px; color: var(--muted); text-transform: uppercase;
+  letter-spacing: .05em; margin-bottom: 10px;
+  display: flex; align-items: baseline; gap: 8px;
+}
+.card h2 .total { color: var(--text); font-weight: 700; font-size: 13px; }
+.card .chart-wrap { position: relative; height: 280px; }
+.card.kv { gap: 6px; }
+.kv-row {
+  display: flex; justify-content: space-between; align-items: baseline;
+  padding: 4px 0; border-bottom: 1px dashed var(--border); font-size: 12px;
+}
+.kv-row:last-child { border-bottom: none; }
+.kv-row .k { color: var(--muted); }
+.kv-row .v { color: var(--text); font-weight: 600; }
+.empty { color: var(--muted); text-align: center; padding: 30px; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>DMR Cap+ Statistics</h1>
+  <nav class="nav">
+    <a href="/">Live</a>
+    <a href="/debrief">Debrief</a>
+    <a href="/stats" class="active">Stats</a>
+  </nav>
+  <div class="meta">
+    Window: <span id="m-window">—</span> events ·
+    First: <span id="m-first">—</span> ·
+    Last: <span id="m-last">—</span> ·
+    <span id="m-version" style="margin-left:12px"></span>
+  </div>
+</header>
+
+<main>
+  <div class="card">
+    <h2>Events by type <span class="total" id="t-events">—</span></h2>
+    <div class="chart-wrap"><canvas id="c-types"></canvas></div>
+  </div>
+  <div class="card">
+    <h2>Top talkers (calls per SRC)</h2>
+    <div class="chart-wrap"><canvas id="c-src"></canvas></div>
+  </div>
+  <div class="card">
+    <h2>Talkgroup distribution</h2>
+    <div class="chart-wrap"><canvas id="c-tg"></canvas></div>
+  </div>
+  <div class="card">
+    <h2>Hourly activity</h2>
+    <div class="chart-wrap"><canvas id="c-hour"></canvas></div>
+  </div>
+  <div class="card kv">
+    <h2>Quality / encryption</h2>
+    <div id="kv-meta"><div class="empty">Loading…</div></div>
+  </div>
+  <div class="card kv">
+    <h2>GPS reports per radio</h2>
+    <div id="kv-pos"><div class="empty">Loading…</div></div>
+  </div>
+</main>
+
+<script>
+const PALETTE = ['#58a6ff','#3fb950','#d29922','#f85149','#bc8cff',
+                 '#ff7b72','#79c0ff','#56d364','#e3b341','#a371f7'];
+Chart.defaults.color = '#8b949e';
+Chart.defaults.borderColor = '#30363d';
+Chart.defaults.font.family = "ui-monospace, monospace";
+Chart.defaults.font.size = 11;
+
+const charts = {};
+
+function makeBar(canvasId, opts = {}) {
+  const ctx = document.getElementById(canvasId).getContext('2d');
+  return new Chart(ctx, {
+    type: 'bar',
+    data: { labels: [], datasets: [{ data: [], backgroundColor: PALETTE[0] }] },
+    options: Object.assign({
+      indexAxis: 'y',
+      responsive: true, maintainAspectRatio: false,
+      plugins: { legend: { display: false } },
+      scales: {
+        x: { grid: { color: '#21262d' }, ticks: { precision: 0 } },
+        y: { grid: { display: false } },
+      },
+    }, opts),
+  });
+}
+
+function makeDoughnut(canvasId) {
+  const ctx = document.getElementById(canvasId).getContext('2d');
+  return new Chart(ctx, {
+    type: 'doughnut',
+    data: { labels: [], datasets: [{ data: [], backgroundColor: PALETTE }] },
+    options: {
+      responsive: true, maintainAspectRatio: false,
+      plugins: { legend: { position: 'right', labels: { boxWidth: 12 } } },
+    },
+  });
+}
+
+function update(chart, labels, values, color) {
+  chart.data.labels = labels;
+  chart.data.datasets[0].data = values;
+  if (color) chart.data.datasets[0].backgroundColor = color;
+  chart.update('none');
+}
+
+function topN(obj, n) {
+  return Object.entries(obj || {})
+    .map(([k, v]) => [k, Number(v)])
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, n);
+}
+
+function fmtTs(iso) {
+  if (!iso) return '—';
+  return new Date(iso).toLocaleString('en-GB', { hour12: false });
+}
+
+function renderKV(el, entries, emptyMsg) {
+  if (!entries.length) {
+    el.innerHTML = `<div class="empty">${emptyMsg}</div>`;
+    return;
+  }
+  el.innerHTML = entries.map(([k, v]) =>
+    `<div class="kv-row"><span class="k">${k}</span><span class="v">${v}</span></div>`
+  ).join('');
+}
+
+charts.types = makeDoughnut('c-types');
+charts.src   = makeBar('c-src');
+charts.tg    = makeBar('c-tg');
+charts.hour  = makeBar('c-hour', { indexAxis: 'x' });
+
+async function refresh() {
+  let s;
+  try {
+    const r = await fetch('/api/stats');
+    if (!r.ok) return;
+    s = await r.json();
+  } catch (_) { return; }
+
+  document.getElementById('m-window').textContent =
+    `${s.window_size}/${s.window_capacity}`;
+  document.getElementById('m-first').textContent = fmtTs(s.first_event_at);
+  document.getElementById('m-last').textContent  = fmtTs(s.last_event_at);
+
+  const types = topN(s.events_by_type, 10);
+  const totalEvents = types.reduce((a, [, v]) => a + v, 0);
+  document.getElementById('t-events').textContent = totalEvents;
+  update(charts.types, types.map(t => t[0]), types.map(t => t[1]));
+
+  const src = topN(s.calls_by_src, 15);
+  update(charts.src, src.map(t => `radio ${t[0]}`), src.map(t => t[1]), '#3fb950');
+
+  const tg = topN(s.calls_by_tg, 10);
+  update(charts.tg, tg.map(t => `TG ${t[0]}`), tg.map(t => t[1]), '#58a6ff');
+
+  // Hourly: keep chronological order, label as just HH on chart.
+  const hourly = Object.entries(s.hourly || {}).sort(([a], [b]) => a < b ? -1 : 1);
+  update(charts.hour,
+    hourly.map(([k]) => k.slice(11, 13) + 'h'),
+    hourly.map(([, v]) => v),
+    '#d29922');
+
+  const qualKV = Object.entries(s.quality_by_kind || {});
+  const metaKV = [
+    ['encrypted_calls', s.encrypted_calls ?? 0],
+    ['quality errors total', qualKV.reduce((a, [, v]) => a + v, 0)],
+    ...qualKV,
+  ];
+  renderKV(document.getElementById('kv-meta'), metaKV, 'No data');
+
+  renderKV(
+    document.getElementById('kv-pos'),
+    topN(s.positions_by_src, 12).map(([k, v]) => [`radio ${k}`, v]),
+    'No GPS reports yet',
+  );
+}
+
+fetch('/api/version').then(r => r.json()).then(v => {
+  if (v && v.version) {
+    document.getElementById('m-version').textContent = `v${v.version}`;
+  }
+}).catch(() => {});
+
+refresh();
+setInterval(refresh, 5000);
+</script>
+</body>
+</html>

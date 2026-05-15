@@ -9,6 +9,29 @@ Versioning follows [Semantic Versioning](https://semver.org/):
 Source of truth: `backend/__init__.py` (`__version__`). The dashboard
 footer shows the running build's version and `/api/version` exposes it.
 
+## [0.6.0] — 2026-05-15
+
+### Added
+- **Stats page (`/stats`)** — Chart.js dashboard fed by `/api/stats`:
+  doughnut of events_by_type, top-15 talkers, talkgroup distribution,
+  hourly histogram, plus key/value panels for quality + GPS counts.
+  Auto-refreshes every 5s.
+- **Debrief browser (`/debrief`)** — full-page event explorer that
+  reads from the on-disk JSONL (not just the in-memory ring buffer),
+  so it can query historical events from previous sessions.
+  Filters: time range, SRC radio, target/TG, event types, page size.
+  Streaming CSV export of the current filter slice. Pagination via
+  offset.
+- `GET /api/history?since=&until=&src=&tgt=&types=&limit=&offset=` —
+  JSON API behind the debrief browser
+- `GET /api/history.csv` — CSV export of the same slice
+- `stream_history()` and `iter_history_csv()` in `event_log.py`
+- Nav links (Live / Debrief / Stats) on every page
+
+### Changed
+- Refactored CSV row generation around `_row_from_dict` so the live and
+  historical exports share a single column-mapping implementation
+
 ## [0.5.1] — 2026-05-15
 
 ### Fixed
