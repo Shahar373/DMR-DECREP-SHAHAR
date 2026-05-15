@@ -208,6 +208,16 @@ async def _run(args: argparse.Namespace) -> None:
     )
 
     state = StateManager()
+    snapshot_path = Path(args.snapshot)
+    if state.load_snapshot(snapshot_path):
+        print(
+            f"# restored {len(state.radios)} radios from {snapshot_path}",
+            file=sys.stderr,
+        )
+    primed = event_log.prime_from_jsonl()
+    if primed:
+        print(f"# primed event buffer with {primed} events from JSONL", file=sys.stderr)
+
     printer = _make_event_printer(state, args.verbose)
     runner = LineRunner(state, on_event=printer, event_log=event_log)
 
@@ -235,7 +245,6 @@ async def _run(args: argparse.Namespace) -> None:
         asyncio.create_task(uv_server.serve())
         print(f"# dashboard → http://0.0.0.0:{args.port}/", file=sys.stderr)
 
-    snapshot_path = Path(args.snapshot)
     snap_task = asyncio.create_task(
         _periodic_snapshot(state, snapshot_path, args.snapshot_interval, stop_event, args.serve)
     )

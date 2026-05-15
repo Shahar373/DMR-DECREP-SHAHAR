@@ -112,7 +112,19 @@ main { padding: 16px; display: grid; gap: 16px;
 
 <main>
   <div class="card quality">
-    <h2>Quality Analyzer — RF link health</h2>
+    <h2>
+      Quality Analyzer — RF link health
+      <span style="margin-left:auto;font-weight:400;font-size:11px;color:var(--muted);text-transform:none;letter-spacing:0">
+        Window:
+        <select id="q-window" style="background:var(--bg3);color:var(--text);border:1px solid var(--border);border-radius:3px;padding:2px 6px;font-size:11px;margin-left:4px">
+          <option value="300">last 5m</option>
+          <option value="900">last 15m</option>
+          <option value="3600" selected>last 1h</option>
+          <option value="21600">last 6h</option>
+          <option value="86400">last 24h</option>
+        </select>
+      </span>
+    </h2>
     <div class="q-headline">
       <div>
         <div class="q-big" id="q-rate">—</div>
@@ -121,6 +133,7 @@ main { padding: 16px; display: grid; gap: 16px;
       <div class="q-verdict" id="q-verdict">—</div>
       <div class="q-hint" id="q-hint">Use this to tune antenna height / gain — lower is better.</div>
     </div>
+    <div class="q-meta" id="q-sample" style="margin-bottom:8px">—</div>
     <table class="q-table">
       <thead>
         <tr>
@@ -247,7 +260,18 @@ function renderQuality(qr) {
     document.getElementById('q-hint').textContent =
       'Waiting for control-channel traffic to build statistics…';
     document.getElementById('q-tbody').innerHTML = '';
+    document.getElementById('q-sample').textContent = '—';
     return;
+  }
+  const sampleEl = document.getElementById('q-sample');
+  if (qr.sample_events === 0) {
+    sampleEl.textContent =
+      `No events in the selected window — try a longer one or wait for traffic.`;
+  } else {
+    const s = qr.window_start ? qr.window_start.replace('T', ' ').split('.')[0] : '—';
+    const e = qr.window_end   ? qr.window_end.replace('T', ' ').split('.')[0]   : '—';
+    sampleEl.textContent =
+      `Sample: ${qr.sample_events.toLocaleString()} events from ${s} → ${e}`;
   }
   const o = qr.overall;
   const rateEl = document.getElementById('q-rate');
@@ -286,6 +310,17 @@ function renderQuality(qr) {
   }).join('');
 }
 
+async function refreshQuality() {
+  const sec = parseInt(document.getElementById('q-window').value, 10) || 3600;
+  try {
+    const r = await fetch(`/api/quality?window=${sec}`);
+    if (!r.ok) return;
+    renderQuality(await r.json());
+  } catch (_) {}
+}
+
+document.getElementById('q-window').addEventListener('change', refreshQuality);
+
 async function refresh() {
   let s;
   try {
@@ -294,7 +329,8 @@ async function refresh() {
     s = await r.json();
   } catch (_) { return; }
 
-  renderQuality(s.quality_ratios);
+  // Quality has its own window-aware endpoint; trigger that too.
+  refreshQuality();
 
   document.getElementById('m-window').textContent =
     `${s.window_size}/${s.window_capacity}`;

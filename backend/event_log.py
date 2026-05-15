@@ -214,6 +214,38 @@ class EventLog:
         with self._lock:
             return len(self._buf)
 
+    def prime_from_jsonl(self, path: Optional[Path] = None) -> int:
+        """Refill the in-memory ring buffer from the on-disk JSONL.
+
+        Called at startup so the live ``/api/events`` feed (Debrief panel
+        on the dashboard) doesn't go blank for a few minutes after a
+        restart. Reads the whole file forward; the deque's maxlen takes
+        care of keeping only the most recent ``capacity`` entries.
+
+        Returns the number of events loaded into the buffer.
+        """
+        from pydantic import TypeAdapter
+        from .models import Event as _Event
+        target = path or self.jsonl_path
+        if target is None or not target.exists():
+            return 0
+        ta = TypeAdapter(_Event)
+        loaded = 0
+        with self._lock:
+            with open(target, "r", encoding="utf-8", errors="replace") as f:
+                for raw in f:
+                    raw = raw.strip()
+                    if not raw:
+                        continue
+                    try:
+                        obj = json.loads(raw)
+                        ev = ta.validate_python(obj)
+                    except Exception:  # noqa: BLE001 — skip junk lines
+                        continue
+                    self._buf.append(ev)
+                    loaded += 1
+        return loaded
+
     def close(self) -> None:
         with self._lock:
             if self._fh is not None:
@@ -420,6 +452,60 @@ def compute_quality_ratios(
         "slco_crc": {"errors": slco_crc, "decodes": voice_ok,
                      "rate": _ratio(slco_crc, voice_ok)},
     }
+
+
+def quality_ratios_over_window(
+    jsonl_path: Optional[Path],
+    window_seconds: int,
+    now: Optional[datetime] = None,
+) -> dict[str, object]:
+    """Compute quality ratios over a fixed time window from the JSONL.
+
+    Unlike ``EventLog.stats()`` which aggregates over the in-memory ring
+    buffer (a few minutes of busy-channel data), this scans the on-disk
+    JSONL and aggregates only events whose timestamp falls in the last
+    ``window_seconds``. The result carries the actual sample bounds so
+    the UI can label the chart honestly ("23,415 events from 13:22 to
+    14:22").
+
+    Falls back to an empty result if the JSONL is missing.
+    """
+    now = now or datetime.now()
+    since = now - timedelta(seconds=window_seconds)
+
+    by_type: Counter[str] = Counter()
+    quality: Counter[str] = Counter()
+    earliest: Optional[datetime] = None
+    latest: Optional[datetime] = None
+    sample = 0
+
+    if jsonl_path is not None and jsonl_path.exists():
+        for obj in stream_history(jsonl_path, since=since):
+            sample += 1
+            et = obj.get("type")
+            if et:
+                by_type[et] += 1
+            if et == "quality":
+                quality[obj.get("error_type", "")] += 1
+            ts_str = obj.get("timestamp")
+            if isinstance(ts_str, str):
+                try:
+                    ts = datetime.fromisoformat(ts_str)
+                except ValueError:
+                    continue
+                if earliest is None or ts < earliest:
+                    earliest = ts
+                if latest is None or ts > latest:
+                    latest = ts
+
+    ratios = compute_quality_ratios(dict(by_type), dict(quality))
+    ratios["window_seconds"] = window_seconds
+    ratios["window_start"] = earliest.isoformat() if earliest else None
+    ratios["window_end"] = latest.isoformat() if latest else None
+    ratios["sample_events"] = sample
+    ratios["events_by_type"] = dict(by_type)
+    ratios["quality_by_kind"] = dict(quality)
+    return ratios
 
 
 def parse_since(value: Optional[str]) -> Optional[datetime]:

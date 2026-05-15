@@ -179,6 +179,31 @@ class StateManager:
             generated_at=self._last_event_at or datetime.now(),
         )
 
+    def load_snapshot(self, path) -> bool:
+        """Restore radios / system / quality from a saved snapshot.json.
+
+        Called at startup so radios, IPs, GPS positions, and lifetime
+        quality counters survive a service restart or Pi reboot. Active
+        calls are *not* restored because they're stale by definition —
+        any in-flight call has long since ended.
+
+        Returns True if the file existed and was loaded, False otherwise.
+        """
+        from pathlib import Path
+        p = Path(path) if not isinstance(path, Path) else path
+        if not p.exists() or p.stat().st_size == 0:
+            return False
+        try:
+            snap = DashboardSnapshot.model_validate_json(p.read_text(encoding="utf-8"))
+        except Exception:  # noqa: BLE001 — corrupt snapshot must not block startup
+            return False
+        self.radios = dict(snap.radios)
+        self.system = snap.system
+        self.quality = snap.quality
+        # active_calls intentionally skipped — they expired during downtime.
+        # _last_event_at is left None so the next real event sets it fresh.
+        return True
+
     def active_talkgroups(self) -> dict[int, int]:
         """Currently-active TGs from the per-LSN snapshot. {lsn: tg}."""
         return {

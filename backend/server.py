@@ -18,7 +18,13 @@ from fastapi import FastAPI, Query, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, HTMLResponse, Response, StreamingResponse
 
 from . import __build_date__, __version__
-from .event_log import EventLog, iter_history_csv, parse_since, stream_history
+from .event_log import (
+    EventLog,
+    iter_history_csv,
+    parse_since,
+    quality_ratios_over_window,
+    stream_history,
+)
 from .recordings import RecordingRegistry
 from .state import StateManager
 
@@ -139,6 +145,19 @@ async def event_stats():
     if _event_log is None:
         return {}
     return _event_log.stats()
+
+
+@app.get("/api/quality")
+async def quality_window(window: int = Query(3600, ge=60, le=7 * 86400)):
+    """Quality ratios computed over a fixed rolling window from the JSONL.
+
+    ``window`` is in seconds (60s – 7d). Default 1h matches what most
+    operators want to see — "is the link healthy *right now*". Unlike
+    /api/stats this scans the on-disk JSONL so it doesn't drift with
+    the in-memory buffer size.
+    """
+    path = _event_log.jsonl_path if _event_log is not None else None
+    return quality_ratios_over_window(path, window_seconds=window)
 
 
 def _history_filters(since, until, src, tgt, types):

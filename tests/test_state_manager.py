@@ -32,6 +32,49 @@ def _ts(seconds: int = 0) -> datetime:
     return datetime(2026, 5, 10, 21, 0, seconds)
 
 
+def test_load_snapshot_restores_radios_system_and_quality_skips_active_calls(tmp_path):
+    """A restart must not wipe the dashboard. State persists, active calls
+    don't (they've expired during the downtime)."""
+    state = StateManager()
+    state.apply(QualityEvent(timestamp=_ts(0), raw_line="q", error_type="CSBK_CRC"))
+    state.apply(IPMappingEvent(
+        timestamp=_ts(1), raw_line="ip", role="SRC", radio_id=101,
+        ip="012.000.000.101", port=4001,
+    ))
+    state.apply(LRRPPositionEvent(
+        timestamp=_ts(2), raw_line="p", src=101, lat=32.1, lon=34.8,
+    ))
+    state.apply(VoiceCallEvent(timestamp=_ts(3), raw_line="v", slot=1, src=101, tgt=9))
+    assert state.active_calls  # sanity — voice frame did spawn an active call
+
+    path = tmp_path / "snapshot.json"
+    path.write_text(state.snapshot().model_dump_json(indent=2))
+
+    restored = StateManager()
+    assert restored.load_snapshot(path) is True
+    assert set(restored.radios.keys()) == {101}
+    assert restored.radios[101].ip == "012.000.000.101"
+    assert restored.radios[101].last_position is not None
+    assert restored.quality.csbk_crc == 1
+    # Active calls deliberately not restored — they're stale.
+    assert restored.active_calls == {}
+
+
+def test_load_snapshot_handles_missing_and_corrupt_files_safely(tmp_path):
+    state = StateManager()
+    assert state.load_snapshot(tmp_path / "does-not-exist.json") is False
+    assert state.radios == {}
+
+    bad = tmp_path / "broken.json"
+    bad.write_text("not json at all")
+    assert state.load_snapshot(bad) is False
+    assert state.radios == {}
+
+    empty = tmp_path / "empty.json"
+    empty.write_text("")
+    assert state.load_snapshot(empty) is False
+
+
 # ===========================================================================
 # Radio discovery and bookkeeping
 # ===========================================================================

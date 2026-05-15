@@ -128,6 +128,101 @@ def test_voice_src_zero_is_excluded_from_call_stats() -> None:
     assert s["calls_by_src"][101] == 1
 
 
+def test_prime_from_jsonl_refills_in_memory_buffer(tmp_path: Path) -> None:
+    """Across a restart the live Debrief feed must not go blank — the
+    ring buffer needs to come back primed from the persisted JSONL."""
+    log_path = tmp_path / "events.jsonl"
+    writer = EventLog(jsonl_path=log_path, capacity=10)
+    for i in range(7):
+        writer.append(_voice(i, 100 + i, 1))
+    writer.close()
+
+    # Fresh process: empty buffer, point at the same JSONL.
+    reader = EventLog(jsonl_path=log_path, capacity=10)
+    assert len(reader) == 0
+    loaded = reader.prime_from_jsonl()
+    assert loaded == 7
+    recent = reader.recent(limit=99)
+    assert [e.src for e in recent] == [100, 101, 102, 103, 104, 105, 106]
+
+
+def test_prime_from_jsonl_respects_buffer_capacity(tmp_path: Path) -> None:
+    """The disk log may have a million lines; the ring buffer must keep
+    only the most recent ``capacity`` entries."""
+    log_path = tmp_path / "events.jsonl"
+    writer = EventLog(jsonl_path=log_path, capacity=1000)
+    for i in range(50):
+        writer.append(_voice(i, 100 + i, 1))
+    writer.close()
+
+    reader = EventLog(jsonl_path=log_path, capacity=5)
+    reader.prime_from_jsonl()
+    recent = reader.recent(limit=99)
+    # Last 5 events: src 145, 146, 147, 148, 149.
+    assert [e.src for e in recent] == [145, 146, 147, 148, 149]
+
+
+def test_quality_ratios_over_window_filters_by_time(tmp_path: Path) -> None:
+    """Quality window must compute over a real time slice, not the whole
+    buffer — that's the whole point of the user-visible window selector."""
+    from backend.event_log import quality_ratios_over_window
+    from backend.models import (
+        ChannelStatusEvent,
+        LSNState,
+        LSNStatusEvent,
+        VoiceCallEvent as VC,
+    )
+    log_path = tmp_path / "events.jsonl"
+    log = EventLog(jsonl_path=log_path, capacity=1000)
+
+    base = datetime(2026, 5, 10, 21, 0, 0)
+    # 5 errors and 100 successful CSBKs *outside* the 1h window.
+    for i in range(5):
+        log.append(QualityEvent(
+            timestamp=base - timedelta(hours=2, seconds=i),
+            raw_line="x", error_type="CSBK_CRC",
+        ))
+    for i in range(100):
+        log.append(ChannelStatusEvent(
+            timestamp=base - timedelta(hours=2, seconds=i),
+            raw_line="cs", fl=3, ts=0, rs=0, rest_lsn=3, block_type="Single",
+        ))
+    # 1 error and 50 successful CSBKs *inside* the 1h window (5 min ago).
+    for i in range(1):
+        log.append(QualityEvent(
+            timestamp=base - timedelta(minutes=5, seconds=i),
+            raw_line="x", error_type="CSBK_CRC",
+        ))
+    for i in range(50):
+        log.append(ChannelStatusEvent(
+            timestamp=base - timedelta(minutes=5, seconds=i),
+            raw_line="cs", fl=3, ts=0, rs=0, rest_lsn=3, block_type="Single",
+        ))
+    log.close()
+
+    qr = quality_ratios_over_window(log_path, window_seconds=3600, now=base)
+
+    # Only the in-window events should count: 1 error / 50 successes = 1/51.
+    assert qr["window_seconds"] == 3600
+    assert qr["sample_events"] == 51
+    assert qr["csbk_crc"]["errors"] == 1
+    assert qr["csbk_crc"]["decodes"] == 50
+    assert abs(qr["csbk_crc"]["rate"] - 1 / 51) < 1e-9
+
+    # Wider window picks up the old block too.
+    qr_all = quality_ratios_over_window(log_path, window_seconds=4 * 3600, now=base)
+    assert qr_all["csbk_crc"]["errors"] == 6
+    assert qr_all["csbk_crc"]["decodes"] == 150
+
+
+def test_quality_ratios_over_window_handles_missing_file(tmp_path: Path) -> None:
+    """No JSONL on disk yet → empty ratios, no crash."""
+    from backend.event_log import quality_ratios_over_window
+    qr = quality_ratios_over_window(tmp_path / "nope.jsonl", window_seconds=3600)
+    assert qr["sample_events"] == 0
+    assert qr["overall"]["rate"] == 0.0
+
+
 def test_stream_history_filters_by_time_type_and_radio(tmp_path: Path) -> None:
     log_path = tmp_path / "events.jsonl"
     log = EventLog(jsonl_path=log_path, capacity=100)

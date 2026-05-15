@@ -9,6 +9,31 @@ Versioning follows [Semantic Versioning](https://semver.org/):
 Source of truth: `backend/__init__.py` (`__version__`). The dashboard
 footer shows the running build's version and `/api/version` exposes it.
 
+## [0.8.0] — 2026-05-15
+
+### Added
+- **State persistence across restart** — `StateManager.load_snapshot()`
+  restores radios, IPs, GPS positions, and lifetime quality counters
+  from `snapshot.json` at startup. Active calls are intentionally not
+  restored (they expired during downtime).
+- **Event buffer priming** — `EventLog.prime_from_jsonl()` refills the
+  in-memory ring buffer from the persisted JSONL on startup, so the
+  Debrief panel doesn't go blank for the first few minutes after a
+  service restart.
+- **Quality window selector** on `/stats` — dropdown to pick the time
+  window (5m / 15m / 1h / 6h / 24h, default 1h). Quality ratios now
+  show the exact sample period and event count, so it's obvious what
+  "1.5%" was averaged over.
+- `GET /api/quality?window=SECONDS` — new endpoint that computes
+  quality ratios over a real time window from the on-disk JSONL,
+  independent of the in-memory ring buffer size.
+
+### Changed
+- Quality Analyzer card now sources its data from `/api/quality`
+  (window-aware, from disk) rather than `/api/stats` (buffer-aware,
+  from memory). This fixes the "1.5% never changes" feel — the rate
+  now reflects the chosen rolling window honestly.
+
 ## [0.7.0] — 2026-05-15
 
 ### Added
