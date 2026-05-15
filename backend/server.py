@@ -10,12 +10,14 @@ Exposes:
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse, HTMLResponse, Response
+from fastapi import FastAPI, Query, WebSocket, WebSocketDisconnect
+from fastapi.responses import FileResponse, HTMLResponse, Response, StreamingResponse
 
+from .event_log import EventLog, parse_since
 from .recordings import RecordingRegistry
 from .state import StateManager
 
@@ -24,6 +26,7 @@ app = FastAPI(title="DMR Cap+ Monitor", docs_url=None, redoc_url=None)
 _state: Optional[StateManager] = None
 _subscribers: set[asyncio.Queue] = set()
 _recordings: Optional[RecordingRegistry] = None
+_event_log: Optional[EventLog] = None
 
 FRONTEND_DIR = Path(__file__).parent.parent / "frontend"
 
@@ -36,6 +39,11 @@ def attach_state(sm: StateManager) -> None:
 def attach_recordings(r: RecordingRegistry) -> None:
     global _recordings
     _recordings = r
+
+
+def attach_event_log(log: EventLog) -> None:
+    global _event_log
+    _event_log = log
 
 
 async def push_snapshot() -> None:
@@ -85,6 +93,46 @@ async def debug_info():
         "files_on_disk": files_on_disk[:50],  # cap output
         "recordings": [r.model_dump(mode="json") for r in recs[:20]],
     }
+
+
+@app.get("/api/events")
+async def list_events(
+    limit: int = Query(500, ge=1, le=5000),
+    since: Optional[str] = Query(None, description="ISO timestamp or duration like '5m', '1h'"),
+    types: Optional[str] = Query(None, description="Comma-separated EventType values"),
+):
+    if _event_log is None:
+        return {"events": [], "total_buffered": 0}
+    type_list = [t.strip() for t in types.split(",") if t.strip()] if types else None
+    evs = _event_log.recent(limit=limit, since=parse_since(since), types=type_list)
+    return {
+        "events": [e.model_dump(mode="json") for e in evs],
+        "total_buffered": len(_event_log),
+    }
+
+
+@app.get("/api/events.csv")
+async def export_events_csv(
+    since: Optional[str] = Query(None),
+    types: Optional[str] = Query(None),
+):
+    if _event_log is None:
+        return Response("", media_type="text/csv")
+    type_list = [t.strip() for t in types.split(",") if t.strip()] if types else None
+    iterator = _event_log.iter_csv(since=parse_since(since), types=type_list)
+    fname = f"dmr_events_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+    return StreamingResponse(
+        iterator,
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="{fname}"'},
+    )
+
+
+@app.get("/api/stats")
+async def event_stats():
+    if _event_log is None:
+        return {}
+    return _event_log.stats()
 
 
 @app.get("/recordings/{filename}")

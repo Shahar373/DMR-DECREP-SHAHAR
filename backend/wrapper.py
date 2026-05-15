@@ -17,6 +17,7 @@ import asyncio
 from collections.abc import AsyncIterator, Callable
 from typing import Optional
 
+from .event_log import EventLog
 from .models import Event
 from .parser import DSDLogParser
 from .state import StateManager
@@ -29,9 +30,11 @@ class LineRunner:
         self,
         state: StateManager,
         on_event: Optional[Callable[[Event], None]] = None,
+        event_log: Optional[EventLog] = None,
     ) -> None:
         self.state = state
         self.on_event = on_event
+        self.event_log = event_log
         self.parser = DSDLogParser()
         self._stop = asyncio.Event()
 
@@ -43,6 +46,8 @@ class LineRunner:
             if ev is None:
                 continue
             self.state.apply(ev)
+            if self.event_log is not None:
+                self.event_log.append(ev)
             if self.on_event is not None:
                 # Don't let a misbehaving printer take down the loop.
                 try:

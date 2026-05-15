@@ -41,6 +41,15 @@ body { font-family: ui-monospace, 'Cascadia Code', monospace;
 #conn.err  { color: var(--red); }
 #conn.wait { color: var(--yellow); }
 
+.header-ctrl {
+  background: var(--bg3); border: 1px solid var(--border);
+  color: var(--text); border-radius: 4px;
+  padding: 3px 8px; font-size: 11px; font-family: inherit;
+  cursor: pointer;
+}
+.header-ctrl:hover { border-color: var(--blue); color: var(--blue); }
+select.header-ctrl { padding-right: 22px; }
+
 /* ── LSN bar ────────────────────────────────────────────────────── */
 #lsn-bar {
   background: var(--bg2); border-bottom: 1px solid var(--border);
@@ -167,6 +176,43 @@ tr.has-gps { cursor: pointer; }
 .hist-play:hover { border-color: var(--blue); color: var(--blue); }
 #no-history { color: var(--muted); font-size: 11px; padding: 12px; text-align: center; }
 
+/* ── Debrief panel ──────────────────────────────────────────────── */
+#debrief-section {
+  border-top: 1px solid var(--border);
+  display: flex; flex-direction: column; min-height: 0;
+  max-height: 38%;
+}
+#debrief-section > h2 {
+  padding: 8px 12px; font-size: 12px; color: var(--muted);
+  border-bottom: 1px solid var(--border); text-transform: uppercase;
+  letter-spacing: .05em; flex-shrink: 0;
+  display: flex; align-items: center; gap: 8px;
+}
+#debrief-section > h2 select {
+  margin-left: auto;
+  background: var(--bg3); color: var(--text);
+  border: 1px solid var(--border); border-radius: 3px;
+  font-size: 10px; padding: 1px 4px; text-transform: none;
+}
+#debrief-list {
+  flex: 1; overflow-y: auto; padding: 4px 6px;
+  display: flex; flex-direction: column; gap: 2px;
+  font-size: 10px; font-family: ui-monospace, monospace;
+}
+.dbr-row {
+  padding: 2px 6px; border-radius: 3px;
+  color: var(--muted); white-space: nowrap;
+  overflow: hidden; text-overflow: ellipsis;
+}
+.dbr-row:hover { background: var(--bg3); color: var(--text); }
+.dbr-time   { color: var(--blue); margin-right: 6px; }
+.dbr-type   { color: var(--yellow); display: inline-block; min-width: 84px; }
+.dbr-type.voice_call    { color: var(--green); }
+.dbr-type.lrrp_position { color: var(--purple); }
+.dbr-type.encryption    { color: var(--purple); }
+.dbr-type.quality       { color: var(--red); }
+#no-debrief { color: var(--muted); padding: 12px; text-align: center; }
+
 /* ── Quality footer ─────────────────────────────────────────────── */
 #footer {
   background: var(--bg2); border-top: 1px solid var(--border);
@@ -185,6 +231,17 @@ tr.has-gps { cursor: pointer; }
   <div class="hitem">Rest LSN: <span id="h-rest">—</span></div>
   <div class="hitem">Radios: <span id="h-radios">0</span></div>
   <div class="hitem">Calls: <span id="h-calls">0</span></div>
+  <div class="hitem" style="margin-left:auto">
+    Show:
+    <select id="stale-filter" class="header-ctrl" title="Hide radios inactive longer than this">
+      <option value="0">All</option>
+      <option value="60">last 1m</option>
+      <option value="300">last 5m</option>
+      <option value="900">last 15m</option>
+      <option value="3600">last 1h</option>
+    </select>
+  </div>
+  <button id="export-csv" class="header-ctrl" title="Download all buffered events as CSV">⤓ Export CSV</button>
   <div id="conn" class="wait">Connecting…</div>
 </div>
 
@@ -200,6 +257,20 @@ tr.has-gps { cursor: pointer; }
       <h2>Recent Voice Calls</h2>
       <div id="history-list"><div id="no-history">No recordings yet</div></div>
       <audio id="hist-audio-el" preload="none" style="display:none"></audio>
+    </div>
+    <div id="debrief-section">
+      <h2>
+        Debrief
+        <select id="debrief-filter" title="Filter by event type">
+          <option value="">all</option>
+          <option value="voice_call">voice</option>
+          <option value="lrrp_position">positions</option>
+          <option value="encryption">encryption</option>
+          <option value="quality">errors</option>
+          <option value="data_header,preamble_csbk">data/csbk</option>
+        </select>
+      </h2>
+      <div id="debrief-list"><div id="no-debrief">No events yet</div></div>
     </div>
   </div>
 
@@ -248,6 +319,13 @@ L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
 const radioMarkers = {};  // radio_id → L.Marker
 const radioTrails  = {};  // radio_id → L.Polyline
 let selectedRadioId = null;
+let staleThresholdSec = 0;  // 0 == disabled; otherwise hide radios idle longer than this
+
+function isStale(radio, refTime) {
+  if (!staleThresholdSec || !radio.last_seen) return false;
+  const ageSec = (refTime - new Date(radio.last_seen).getTime()) / 1000;
+  return ageSec > staleThresholdSec;
+}
 
 function makeIcon(radioId, isActive, isSelected) {
   const color = isActive ? '#3fb950' : '#58a6ff';
@@ -280,8 +358,10 @@ function selectRadio(id) {
 }
 
 function updateMap(snapshot) {
-  const hasPos = Object.values(snapshot.radios).some(r => r.last_position);
-  document.getElementById('map-placeholder').style.display = hasPos ? 'none' : '';
+  const refTime = snapshot.generated_at ? new Date(snapshot.generated_at).getTime() : Date.now();
+  const hasVisiblePos = Object.values(snapshot.radios)
+    .some(r => r.last_position && !isStale(r, refTime));
+  document.getElementById('map-placeholder').style.display = hasVisiblePos ? 'none' : '';
 
   const activeIds = new Set(
     Object.values(snapshot.active_calls).map(c => c.src)
@@ -289,7 +369,13 @@ function updateMap(snapshot) {
 
   for (const [rid, radio] of Object.entries(snapshot.radios)) {
     const id = parseInt(rid);
-    if (!radio.last_position) continue;
+    const stale = isStale(radio, refTime);
+    if (!radio.last_position || stale) {
+      // Tear down marker + trail when the radio falls behind the freshness threshold.
+      if (radioMarkers[id]) { map.removeLayer(radioMarkers[id]); delete radioMarkers[id]; }
+      if (radioTrails[id])  { map.removeLayer(radioTrails[id]);  delete radioTrails[id]; }
+      continue;
+    }
     const { lat, lon } = radio.last_position;
     const isActive = activeIds.has(id);
     const isSelected = id === selectedRadioId;
@@ -305,14 +391,25 @@ function updateMap(snapshot) {
     }
 
     // Trail — only render for the selected radio (avoid spaghetti).
+    // Drop trail points older than the staleness threshold so old breadcrumbs disappear.
     if (isSelected && radio.position_history && radio.position_history.length > 1) {
-      const pts = radio.position_history.map(p => [p.lat, p.lon]);
-      if (radioTrails[id]) {
-        radioTrails[id].setLatLngs(pts);
-      } else {
-        radioTrails[id] = L.polyline(pts, {
-          color: '#d29922', weight: 4, opacity: 0.85,
-        }).addTo(map);
+      let pts = radio.position_history;
+      if (staleThresholdSec) {
+        const cutoff = refTime - staleThresholdSec * 1000;
+        pts = pts.filter(p => new Date(p.at).getTime() >= cutoff);
+      }
+      if (pts.length > 1) {
+        const latlngs = pts.map(p => [p.lat, p.lon]);
+        if (radioTrails[id]) {
+          radioTrails[id].setLatLngs(latlngs);
+        } else {
+          radioTrails[id] = L.polyline(latlngs, {
+            color: '#d29922', weight: 4, opacity: 0.85,
+          }).addTo(map);
+        }
+      } else if (radioTrails[id]) {
+        map.removeLayer(radioTrails[id]);
+        delete radioTrails[id];
       }
     } else if (radioTrails[id]) {
       map.removeLayer(radioTrails[id]);
@@ -399,7 +496,8 @@ function renderCalls(snap) {
 
 function renderRadios(snap) {
   const activeIds = new Set(Object.values(snap.active_calls).map(c => c.src));
-  let rows = Object.values(snap.radios);
+  const refTime = snap.generated_at ? new Date(snap.generated_at).getTime() : Date.now();
+  let rows = Object.values(snap.radios).filter(r => !isStale(r, refTime));
 
   rows.sort((a, b) => {
     let va = a[sortCol], vb = b[sortCol];
@@ -603,6 +701,75 @@ async function refreshHistory() {
 }
 refreshHistory();
 setInterval(refreshHistory, 3000);
+
+// ── Stale-radio filter ─────────────────────────────────────────────
+const staleSel = document.getElementById('stale-filter');
+staleSel.addEventListener('change', () => {
+  staleThresholdSec = parseInt(staleSel.value, 10) || 0;
+  if (lastSnap) render(lastSnap);
+});
+
+// ── CSV export button ──────────────────────────────────────────────
+document.getElementById('export-csv').addEventListener('click', () => {
+  // Plain navigation triggers the browser's download for attachment responses.
+  window.location.href = '/api/events.csv';
+});
+
+// ── Debrief panel ──────────────────────────────────────────────────
+const debriefSel = document.getElementById('debrief-filter');
+function describeEvent(ev) {
+  switch (ev.type) {
+    case 'voice_call':
+      return `slot${ev.slot} SRC=${ev.src} → TG ${ev.tgt}` +
+             (ev.is_cap_plus ? ' Cap+' : '') + (ev.is_txi ? ' TXI' : '');
+    case 'lrrp_position':
+      return `radio=${ev.src ?? '—'} (${ev.lat.toFixed(5)}, ${ev.lon.toFixed(5)})`;
+    case 'preamble_csbk':
+      return `${ev.addressing}/${ev.kind} SRC=${ev.src} → ${ev.tgt}`;
+    case 'data_header':
+      return `slot${ev.slot} SRC=${ev.src} → ${ev.tgt} ${ev.delivery}`;
+    case 'ip_mapping':
+      return `${ev.role} radio=${ev.radio_id} ip=${ev.ip}:${ev.port}`;
+    case 'lrrp_request':
+      return `${ev.direction} SRC=${ev.src} → ${ev.tgt}`;
+    case 'encryption':
+      return `slot${ev.slot} FLCO=${ev.flco} FID=${ev.fid}`;
+    case 'site_info':
+      return `site=${ev.site} rest_lsn=${ev.rest_lsn}`;
+    case 'quality':
+      return ev.error_type;
+    default:
+      return '';
+  }
+}
+function renderDebrief(events) {
+  const el = document.getElementById('debrief-list');
+  if (!events.length) {
+    el.innerHTML = '<div id="no-debrief">No events yet</div>';
+    return;
+  }
+  // Newest first.
+  const rows = events.slice().reverse().map(ev => {
+    const t = new Date(ev.timestamp).toLocaleTimeString('en-GB', { hour12: false });
+    const desc = describeEvent(ev);
+    return `<div class="dbr-row"><span class="dbr-time">${t}</span>` +
+           `<span class="dbr-type ${ev.type}">${ev.type}</span> ${desc}</div>`;
+  });
+  el.innerHTML = rows.join('');
+}
+async function refreshDebrief() {
+  try {
+    const types = debriefSel.value;
+    const url = '/api/events?limit=200' + (types ? `&types=${encodeURIComponent(types)}` : '');
+    const r = await fetch(url);
+    if (!r.ok) return;
+    const data = await r.json();
+    renderDebrief(data.events || []);
+  } catch (_) {}
+}
+debriefSel.addEventListener('change', refreshDebrief);
+refreshDebrief();
+setInterval(refreshDebrief, 2000);
 </script>
 </body>
 </html>

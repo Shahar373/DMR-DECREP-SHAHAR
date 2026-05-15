@@ -180,6 +180,10 @@ def _parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
                    help="HTTP/WebSocket port when --serve is used (default: %(default)s)")
     p.add_argument("--calls-dir", default="/tmp/dmr_calls",
                    help="directory dsd-fme writes per-call WAVs into (default: %(default)s)")
+    p.add_argument("--event-log", default="events.jsonl",
+                   help="append-only JSONL of every parsed event (default: %(default)s)")
+    p.add_argument("--event-buffer", type=int, default=20000,
+                   help="in-memory event ring buffer size (default: %(default)s)")
     return p.parse_args(argv)
 
 
@@ -192,9 +196,15 @@ async def _run(args: argparse.Namespace) -> None:
         from .recordings import RecordingRegistry
         recordings = RecordingRegistry(calls_dir)
 
+    from .event_log import EventLog
+    event_log = EventLog(
+        jsonl_path=Path(args.event_log) if args.event_log else None,
+        capacity=args.event_buffer,
+    )
+
     state = StateManager()
     printer = _make_event_printer(state, args.verbose)
-    runner = LineRunner(state, on_event=printer)
+    runner = LineRunner(state, on_event=printer, event_log=event_log)
 
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGINT, signal.SIGTERM):
@@ -207,6 +217,7 @@ async def _run(args: argparse.Namespace) -> None:
         srv.attach_state(state)
         if recordings is not None:
             srv.attach_recordings(recordings)
+        srv.attach_event_log(event_log)
         config = uvicorn.Config(
             srv.app,
             host="0.0.0.0",
@@ -250,6 +261,7 @@ async def _run(args: argparse.Namespace) -> None:
             await snap_task
         except asyncio.CancelledError:
             pass
+        event_log.close()
 
     _print_summary(state)
 
