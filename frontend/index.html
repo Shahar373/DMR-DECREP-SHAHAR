@@ -92,6 +92,7 @@ select.header-ctrl { padding-right: 22px; }
 .call-card {
   background: var(--bg3); border: 1px solid var(--border);
   border-left: 3px solid var(--green); border-radius: 6px; padding: 8px 10px;
+  flex-shrink: 0;
 }
 .call-card.enc { border-left-color: var(--purple); }
 .call-src  { font-size: 15px; font-weight: 700; color: var(--text); }
@@ -187,6 +188,7 @@ tr.has-gps { cursor: pointer; }
   border-left: 3px solid var(--blue); border-radius: 4px;
   padding: 5px 8px; font-size: 11px;
   display: flex; align-items: center; gap: 8px;
+  flex-shrink: 0;
 }
 .hist-card.enc { border-left-color: var(--purple); }
 .hist-card.playing { border-left-color: var(--yellow); background: #2a2520; }
@@ -229,6 +231,7 @@ tr.has-gps { cursor: pointer; }
   color: var(--text);
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
   line-height: 1.35;
+  flex-shrink: 0;  /* prevent vertical squashing — let the list scroll instead */
 }
 .dbr-row:hover { background: var(--bg3); }
 .dbr-time   { color: var(--blue); margin-right: 8px; }

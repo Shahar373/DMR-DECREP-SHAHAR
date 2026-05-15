@@ -9,6 +9,13 @@ Versioning follows [Semantic Versioning](https://semver.org/):
 Source of truth: `backend/__init__.py` (`__version__`). The dashboard
 footer shows the running build's version and `/api/version` exposes it.
 
+## [0.5.1] — 2026-05-15
+
+### Fixed
+- Debrief / Recent / Active rows collapsed to ~1px tall when the list
+  filled up. Added `flex-shrink: 0` to the row elements so the flex
+  column overflows and scrolls instead of squashing rows together.
+
 ## [0.5.0] — 2026-05-15
 
 ### Added
