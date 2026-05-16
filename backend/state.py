@@ -15,9 +15,12 @@ historical log uses the log's own timestamps as "now".
 """
 from __future__ import annotations
 
+import os
+import tempfile
 from collections.abc import Callable
 from datetime import datetime, timedelta
-from typing import Optional
+from pathlib import Path
+from typing import Optional, Union
 
 from pydantic import BaseModel, Field
 
@@ -37,6 +40,38 @@ from .models import (
     SiteInfoEvent,
     VoiceCallEvent,
 )
+
+
+def atomic_write_text(path: Union[Path, str], content: str, keep_backup: bool = True) -> None:
+    """Write ``content`` to ``path`` such that a power-yank mid-write can't
+    leave the file truncated.
+
+    Strategy: write to ``path.tmp`` in the same directory, fsync, then
+    ``os.replace`` over the target (atomic on POSIX). When ``keep_backup``
+    is True, the previous file (if any) is preserved as ``path.bak`` before
+    the swap so a corrupt new write still leaves a recoverable previous
+    snapshot for ``load_snapshot`` to fall back to.
+    """
+    p = Path(path)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    tmp_fd, tmp_name = tempfile.mkstemp(prefix=p.name + ".", suffix=".tmp", dir=str(p.parent))
+    try:
+        with os.fdopen(tmp_fd, "w", encoding="utf-8") as f:
+            f.write(content)
+            f.flush()
+            os.fsync(f.fileno())
+        if keep_backup and p.exists():
+            try:
+                os.replace(str(p), str(p) + ".bak")
+            except OSError:
+                pass
+        os.replace(tmp_name, str(p))
+    except Exception:
+        try:
+            os.unlink(tmp_name)
+        except OSError:
+            pass
+        raise
 
 
 class Position(BaseModel):
@@ -189,22 +224,30 @@ class StateManager:
         calls are *not* restored because they're stale by definition —
         any in-flight call has long since ended.
 
-        Returns True if the file existed and was loaded, False otherwise.
+        Falls back to ``path.bak`` (kept by ``atomic_write_text``) if the
+        main file is missing or unreadable — covers the case where a
+        power-yank truncated the current snapshot but the previous one is
+        still good on disk.
+
+        Returns True if either file existed and parsed, False otherwise.
         """
-        from pathlib import Path
         p = Path(path) if not isinstance(path, Path) else path
-        if not p.exists() or p.stat().st_size == 0:
-            return False
-        try:
-            snap = DashboardSnapshot.model_validate_json(p.read_text(encoding="utf-8"))
-        except Exception:  # noqa: BLE001 — corrupt snapshot must not block startup
-            return False
-        self.radios = dict(snap.radios)
-        self.system = snap.system
-        self.quality = snap.quality
-        # active_calls intentionally skipped — they expired during downtime.
-        # _last_event_at is left None so the next real event sets it fresh.
-        return True
+        for candidate in (p, p.with_suffix(p.suffix + ".bak")):
+            if not candidate.exists() or candidate.stat().st_size == 0:
+                continue
+            try:
+                snap = DashboardSnapshot.model_validate_json(
+                    candidate.read_text(encoding="utf-8")
+                )
+            except Exception:  # noqa: BLE001 — corrupt snapshot must not block startup
+                continue
+            self.radios = dict(snap.radios)
+            self.system = snap.system
+            self.quality = snap.quality
+            # active_calls intentionally skipped — they expired during downtime.
+            # _last_event_at is left None so the next real event sets it fresh.
+            return True
+        return False
 
     def active_talkgroups(self) -> dict[int, int]:
         """Currently-active TGs from the per-LSN snapshot. {lsn: tg}."""

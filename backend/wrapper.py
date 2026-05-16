@@ -14,6 +14,7 @@ any async iterator of strings.
 from __future__ import annotations
 
 import asyncio
+import sys
 from collections.abc import AsyncIterator, Callable
 from typing import Optional
 
@@ -63,12 +64,21 @@ async def stream_subprocess(
     args: list[str],
     stop_event: Optional[asyncio.Event] = None,
     env: Optional[dict] = None,
+    liveness_timeout: Optional[float] = None,
 ) -> AsyncIterator[str]:
     """Spawn a subprocess and yield its stderr line by line.
 
-    When `stop_event` fires the child is SIGTERM'd; on shutdown we wait up to
-    2s before SIGKILL.  Pass ``env`` to override the inherited environment
-    (e.g. to set PULSE_SINK for dsd-fme).
+    When `stop_event` fires the child is SIGTERM'd; on shutdown we wait up
+    to 2 s before SIGKILL.  Pass ``env`` to override the inherited
+    environment (e.g. to set PULSE_SINK for dsd-fme).
+
+    When ``liveness_timeout`` is set, the subprocess is killed and this
+    generator returns if no stderr line arrives for that many seconds in a
+    row. dsd-fme normally emits a sync line every ~60 ms, so a 60 s silence
+    almost always means a stuck child (PulseAudio dropped, SDRconnect
+    crashed, USB power dipped) — systemd ``Restart=on-failure`` then brings
+    us back. ``None`` disables the watchdog (the default, so existing
+    callers don't change behaviour).
     """
     proc = await asyncio.create_subprocess_exec(
         *args,
@@ -87,8 +97,26 @@ async def stream_subprocess(
             proc.terminate()
 
     watcher = asyncio.create_task(_terminate_on_stop())
+    timed_out = False
     try:
-        async for raw in proc.stderr:
+        while True:
+            try:
+                if liveness_timeout is not None:
+                    raw = await asyncio.wait_for(
+                        proc.stderr.readline(), timeout=liveness_timeout
+                    )
+                else:
+                    raw = await proc.stderr.readline()
+            except asyncio.TimeoutError:
+                timed_out = True
+                print(
+                    f"# liveness: no subprocess output for {liveness_timeout}s "
+                    "— terminating child so systemd can restart us",
+                    file=sys.stderr,
+                )
+                break
+            if not raw:
+                break  # EOF
             yield raw.decode("utf-8", errors="replace")
     finally:
         watcher.cancel()
@@ -105,6 +133,11 @@ async def stream_subprocess(
             except asyncio.TimeoutError:
                 proc.kill()
                 await proc.wait()
+        if timed_out:
+            # Non-zero exit so systemd's Restart=on-failure kicks in.
+            raise RuntimeError(
+                f"subprocess liveness timeout ({liveness_timeout}s) — no output"
+            )
 
 
 async def stream_file(

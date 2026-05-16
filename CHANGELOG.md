@@ -9,6 +9,44 @@ Versioning follows [Semantic Versioning](https://semver.org/):
 Source of truth: `backend/__init__.py` (`__version__`). The dashboard
 footer shows the running build's version and `/api/version` exposes it.
 
+## [0.12.0] — 2026-05-16
+
+### Added — Foundation block ("walk-away-safe on a Pi")
+- **`GET /api/health`** — stable JSON snapshot of the running process:
+  `version`, `build_date`, `uptime_seconds`, `last_event_age_seconds`,
+  `last_voice_age_seconds`, file sizes (`events.jsonl`, `events.db`,
+  `snapshot.json`), free disk on the JSONL filesystem, and a
+  `calls_dir` summary (`count`, `total_bytes`, `oldest_age_seconds`).
+  Designed for cron `curl` / healthchecks.io / prometheus-textfile
+  watchdogs — every probe degrades to `null` on failure rather than
+  taking the endpoint down. New `backend/health.py` module.
+- **dsd-fme liveness watchdog** in `stream_subprocess`: when
+  `--liveness-timeout` seconds pass with no stderr output (default 60s),
+  the child is terminated and the process exits non-zero so systemd's
+  `Restart=on-failure` brings the service back. Catches "PulseAudio
+  dropped" / "SDRconnect crashed" / "USB power dipped" silent stalls
+  that `Restart=on-failure` alone wouldn't notice. `0` disables.
+- **WAV retention janitor** — hourly background task in CLI deletes
+  per-call WAVs in `--calls-dir` older than `--wav-retention-hours`
+  (default 72 h). Otherwise dsd-fme's per-call output fills the SD
+  card in a few busy days. `0` disables. New `prune_older_than(hours)`
+  on `RecordingRegistry`.
+- `note_voice_event()` hook + `attach_snapshot_path()` on the FastAPI
+  server so `/api/health` can answer "are radios actually talking,
+  not just is the CC alive" and report the snapshot file's size.
+
+### Changed
+- **Snapshot writes are now atomic.** `cli.py`'s periodic and final
+  snapshot writes go through `atomic_write_text` (write to `.tmp`,
+  `fsync`, `os.replace`) so a power-yank mid-write can't leave
+  `snapshot.json` truncated. The previous file is preserved as
+  `snapshot.json.bak`.
+- `StateManager.load_snapshot` now falls back to `snapshot.json.bak`
+  if the main file is missing or unparseable — covers the case where
+  a power-yank corrupted the current snapshot but the previous one is
+  still good.
+- New CLI flags: `--liveness-timeout SECONDS`, `--wav-retention-hours HOURS`.
+
 ## [0.11.1] — 2026-05-16
 
 ### Fixed

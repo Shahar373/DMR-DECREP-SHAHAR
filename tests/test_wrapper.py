@@ -102,3 +102,48 @@ def test_stream_file_replays_capture_into_state():
     assert state.system.site == 2
     radios_with_position = {rid for rid, r in state.radios.items() if r.last_position}
     assert radios_with_position & {65, 68, 70, 74}
+
+
+# ── Subprocess liveness watchdog ────────────────────────────────────
+
+def test_stream_subprocess_triggers_liveness_timeout_on_silent_child():
+    """A subprocess that stays open but produces no stderr should be
+    killed and a RuntimeError raised after the liveness timeout, so that
+    systemd's Restart=on-failure brings the service back."""
+    import pytest
+
+    from backend.wrapper import stream_subprocess
+
+    async def consume():
+        # `sleep 5` exits 0 with no stderr — never emits a line, so the
+        # 0.2 s watchdog must fire well before sleep finishes.
+        gen = stream_subprocess(["sleep", "5"], liveness_timeout=0.2)
+        async for _line in gen:
+            pass
+
+    with pytest.raises(RuntimeError, match="liveness timeout"):
+        asyncio.run(consume())
+
+
+def test_stream_subprocess_no_timeout_when_lines_keep_flowing():
+    """Liveness watchdog is per-line — a child that emits any line within
+    the timeout window must keep running until natural EOF."""
+    import sys as _sys
+
+    from backend.wrapper import stream_subprocess
+
+    async def collect():
+        # Python one-liner that writes two lines to stderr (what we
+        # capture) and exits cleanly. No timeout should fire.
+        gen = stream_subprocess(
+            [_sys.executable, "-c",
+             "import sys; sys.stderr.write('a\\nb\\n'); sys.stderr.flush()"],
+            liveness_timeout=1.0,
+        )
+        out = []
+        async for line in gen:
+            out.append(line)
+        return out
+
+    lines = asyncio.run(collect())
+    assert lines == ["a\n", "b\n"]

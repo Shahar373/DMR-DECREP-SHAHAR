@@ -23,7 +23,7 @@ from pathlib import Path
 from typing import Optional
 
 from .models import Event, EventType
-from .state import StateManager
+from .state import StateManager, atomic_write_text
 from .wrapper import LineRunner, stream_file, stream_subprocess
 
 
@@ -109,6 +109,35 @@ def _make_event_printer(state: StateManager, verbose: bool):
     return printer
 
 
+async def _periodic_wav_retention(
+    recordings,
+    hours: float,
+    stop_event: asyncio.Event,
+    interval_seconds: float = 3600.0,
+) -> None:
+    """Hourly background task that deletes per-call WAVs older than the
+    retention window. Logs each pass to stderr so the operator sees the
+    janitor doing its job."""
+    if recordings is None or hours <= 0:
+        return
+    while not stop_event.is_set():
+        try:
+            await asyncio.wait_for(stop_event.wait(), timeout=interval_seconds)
+            break
+        except asyncio.TimeoutError:
+            pass
+        try:
+            deleted, freed = recordings.prune_older_than(hours)
+            if deleted:
+                print(
+                    f"# wav-retention: deleted {deleted} files "
+                    f"({freed/1024/1024:.1f} MiB) older than {hours}h",
+                    file=sys.stderr,
+                )
+        except Exception as e:  # noqa: BLE001
+            print(f"# wav-retention: pass failed: {e}", file=sys.stderr)
+
+
 async def _periodic_snapshot(
     state: StateManager,
     path: Path,
@@ -125,7 +154,11 @@ async def _periodic_snapshot(
             pass
         state.tick(datetime.now())
         try:
-            path.write_text(state.snapshot().model_dump_json(indent=2))
+            # Atomic write — power-yank mid-write must not leave a
+            # truncated snapshot. ``atomic_write_text`` also preserves
+            # the previous file as ``snapshot.json.bak`` so
+            # ``StateManager.load_snapshot`` can fall back to it.
+            atomic_write_text(path, state.snapshot().model_dump_json(indent=2))
         except Exception as e:  # noqa: BLE001
             print(f"# snapshot write failed: {e}", file=sys.stderr)
         if serve:
@@ -191,6 +224,14 @@ def _parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
                    help="SQLite index path (default: --event-log with .db suffix)")
     p.add_argument("--no-event-db", action="store_true",
                    help="disable the SQLite index sidecar (JSONL-only)")
+    p.add_argument("--liveness-timeout", type=float, default=60.0,
+                   help="exit (so systemd restarts us) if dsd-fme produces no "
+                        "stderr output for this many seconds (live mode only; "
+                        "default: %(default)s, 0 disables)")
+    p.add_argument("--wav-retention-hours", type=float, default=72.0,
+                   help="delete per-call WAVs in --calls-dir older than this "
+                        "many hours; checked once an hour (default: %(default)s, "
+                        "0 disables)")
     return p.parse_args(argv)
 
 
@@ -237,6 +278,19 @@ async def _run(args: argparse.Namespace) -> None:
         print(f"# primed event buffer with {primed} events from JSONL", file=sys.stderr)
 
     printer = _make_event_printer(state, args.verbose)
+    if args.serve:
+        # Wrap so the FastAPI ``/api/health`` endpoint can answer
+        # "when was the last voice frame", not just "when was any event".
+        from . import server as srv
+
+        _printer = printer
+
+        def printer_with_voice_marker(ev: Event) -> None:
+            if ev.type == EventType.VOICE_CALL:
+                srv.note_voice_event(ev.timestamp)
+            _printer(ev)
+
+        printer = printer_with_voice_marker
     runner = LineRunner(state, on_event=printer, event_log=event_log)
 
     loop = asyncio.get_running_loop()
@@ -251,6 +305,7 @@ async def _run(args: argparse.Namespace) -> None:
         if recordings is not None:
             srv.attach_recordings(recordings)
         srv.attach_event_log(event_log)
+        srv.attach_snapshot_path(snapshot_path)
         config = uvicorn.Config(
             srv.app,
             host="0.0.0.0",
@@ -266,6 +321,11 @@ async def _run(args: argparse.Namespace) -> None:
     snap_task = asyncio.create_task(
         _periodic_snapshot(state, snapshot_path, args.snapshot_interval, stop_event, args.serve)
     )
+    retention_task: Optional[asyncio.Task] = None
+    if recordings is not None and args.wav_retention_hours > 0:
+        retention_task = asyncio.create_task(
+            _periodic_wav_retention(recordings, args.wav_retention_hours, stop_event)
+        )
 
     if args.live:
         # dsd-fme writes per-call WAVs to --calls-dir via `-7 <dir> -P`.
@@ -278,7 +338,8 @@ async def _run(args: argparse.Namespace) -> None:
             "-P",
         ]
         print(f"# starting: {' '.join(cmd)}", file=sys.stderr)
-        source = stream_subprocess(cmd, stop_event=stop_event)
+        liveness = args.liveness_timeout if args.liveness_timeout > 0 else None
+        source = stream_subprocess(cmd, stop_event=stop_event, liveness_timeout=liveness)
     else:
         print(f"# replaying {args.replay} (delay={args.replay_delay}s)", file=sys.stderr)
         source = stream_file(args.replay, delay=args.replay_delay, stop_event=stop_event)
@@ -287,12 +348,21 @@ async def _run(args: argparse.Namespace) -> None:
         await runner.consume_lines(source)
     finally:
         stop_event.set()
-        snapshot_path.write_text(state.snapshot().model_dump_json(indent=2))
+        try:
+            atomic_write_text(snapshot_path, state.snapshot().model_dump_json(indent=2))
+        except Exception as e:  # noqa: BLE001
+            print(f"# final snapshot write failed: {e}", file=sys.stderr)
         snap_task.cancel()
         try:
             await snap_task
         except asyncio.CancelledError:
             pass
+        if retention_task is not None:
+            retention_task.cancel()
+            try:
+                await retention_task
+            except asyncio.CancelledError:
+                pass
         event_log.close()
 
     _print_summary(state)

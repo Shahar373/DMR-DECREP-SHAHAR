@@ -128,3 +128,33 @@ class RecordingRegistry:
             ))
         recs.sort(key=lambda r: r.started_at, reverse=True)
         return recs
+
+    def prune_older_than(self, hours: float) -> tuple[int, int]:
+        """Delete WAV files in ``base_dir`` older than ``hours``.
+
+        Per-call WAVs accumulate forever otherwise — on a Pi 5 with a
+        small SD card a busy DMR site fills the disk in a few days. We
+        delete files whose mtime is older than the cutoff. Returns
+        ``(deleted_count, deleted_bytes)`` so callers can log it.
+        """
+        if hours <= 0 or not self.base_dir.exists():
+            return (0, 0)
+        cutoff = time.time() - hours * 3600
+        deleted = 0
+        freed = 0
+        for p in self.base_dir.iterdir():
+            if not p.is_file() or p.suffix.lower() != ".wav":
+                continue
+            try:
+                stat = p.stat()
+            except OSError:
+                continue
+            if stat.st_mtime >= cutoff:
+                continue
+            try:
+                p.unlink()
+            except OSError:
+                continue
+            deleted += 1
+            freed += stat.st_size
+        return (deleted, freed)

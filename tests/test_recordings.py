@@ -154,3 +154,40 @@ def test_file_path_prevents_path_traversal(tmp_path: Path):
     p = r.file_path("../../etc/passwd")
     assert p.parent == tmp_path
     assert p.name == "passwd"
+
+
+# ── Retention ────────────────────────────────────────────────────────
+
+def test_prune_older_than_deletes_old_files_only(tmp_path: Path):
+    old = tmp_path / "old.wav"
+    young = tmp_path / "young.wav"
+    _write_wav(old, duration_sec=0.5)
+    _write_wav(young, duration_sec=0.5)
+    _age_file(old, seconds=4 * 3600)    # 4h old
+    _age_file(young, seconds=10 * 60)   # 10 min old
+    r = RecordingRegistry(tmp_path, min_duration=0.2)
+    deleted, freed = r.prune_older_than(hours=1.0)
+    assert deleted == 1
+    assert freed > 0
+    assert not old.exists()
+    assert young.exists()
+
+
+def test_prune_older_than_skips_non_wav_files(tmp_path: Path):
+    note = tmp_path / "notes.txt"
+    note.write_text("important", encoding="utf-8")
+    _age_file(note, seconds=10 * 3600)
+    r = RecordingRegistry(tmp_path)
+    deleted, freed = r.prune_older_than(hours=1.0)
+    assert deleted == 0
+    assert note.exists()
+
+
+def test_prune_older_than_zero_hours_is_noop(tmp_path: Path):
+    old = tmp_path / "old.wav"
+    _write_wav(old, duration_sec=0.5)
+    _age_file(old, seconds=10 * 3600)
+    r = RecordingRegistry(tmp_path)
+    deleted, _ = r.prune_older_than(hours=0)
+    assert deleted == 0
+    assert old.exists()

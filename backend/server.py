@@ -37,8 +37,24 @@ _state: Optional[StateManager] = None
 _subscribers: set[asyncio.Queue] = set()
 _recordings: Optional[RecordingRegistry] = None
 _event_log: Optional[EventLog] = None
+# When the server process came up — used by ``/api/health`` to report
+# uptime. Pinned at import time so it's stable across requests.
+_started_at: datetime = datetime.now()
+# Last voice frame seen — distinct from "any event" so an idle channel
+# (quality errors still arriving from CC) doesn't look healthy to an
+# operator who actually cares about traffic.
+_last_voice_at: Optional[datetime] = None
 
 FRONTEND_DIR = Path(__file__).parent.parent / "frontend"
+
+
+def note_voice_event(ts: datetime) -> None:
+    """Bump the last-voice-seen marker (called by the wrapper on each
+    voice_call event so /api/health can answer "are radios actually
+    talking, not just is the CC alive")."""
+    global _last_voice_at
+    if _last_voice_at is None or ts > _last_voice_at:
+        _last_voice_at = ts
 
 
 def attach_state(sm: StateManager) -> None:
@@ -54,6 +70,16 @@ def attach_recordings(r: RecordingRegistry) -> None:
 def attach_event_log(log: EventLog) -> None:
     global _event_log
     _event_log = log
+
+
+_snapshot_path: Optional[Path] = None
+
+
+def attach_snapshot_path(path: Optional[Path]) -> None:
+    """Tell /api/health where the snapshot.json lives, so it can report
+    the file's size and whether it's actually being written."""
+    global _snapshot_path
+    _snapshot_path = path
 
 
 async def push_snapshot() -> None:
@@ -108,6 +134,36 @@ async def debug_info():
 @app.get("/api/version")
 async def get_version():
     return {"version": __version__, "build_date": __build_date__}
+
+
+@app.get("/api/health")
+async def get_health():
+    """Liveness + capacity snapshot for ops dashboards and watchdogs.
+
+    Stable JSON shape; individual probes degrade to ``null`` rather than
+    raising so a partial outage in one subsystem doesn't take the
+    endpoint with it.
+    """
+    from .health import compute_health
+    last_event_at = None
+    if _state is not None:
+        last_event_at = getattr(_state, "_last_event_at", None)
+    jsonl_path = _event_log.jsonl_path if _event_log is not None else None
+    db_path = None
+    if _event_log is not None and _event_log.index is not None:
+        db_path = _event_log.index.db_path
+    calls_dir = _recordings.base_dir if _recordings is not None else None
+    return compute_health(
+        version=__version__,
+        build_date=__build_date__,
+        started_at=_started_at,
+        last_event_at=last_event_at,
+        last_voice_at=_last_voice_at,
+        jsonl_path=jsonl_path,
+        db_path=db_path,
+        snapshot_path=_snapshot_path,
+        calls_dir=calls_dir,
+    )
 
 
 @app.get("/api/events")
