@@ -10,6 +10,7 @@ Exposes:
 from __future__ import annotations
 
 import asyncio
+import sys
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
@@ -351,8 +352,10 @@ async def ws_endpoint(websocket: WebSocket):
         while True:
             data = await q.get()
             await websocket.send_text(data)
-    except (WebSocketDisconnect, Exception):
+    except WebSocketDisconnect:
         pass
+    except Exception as exc:  # noqa: BLE001
+        print(f"# ws: client error: {exc}", file=sys.stderr)
     finally:
         _subscribers.discard(q)
 

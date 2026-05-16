@@ -7,7 +7,6 @@ Used by ``GET /api/radio/{radio_id}``.
 """
 from __future__ import annotations
 
-import json
 from collections import Counter
 from datetime import datetime, timedelta
 from typing import Optional
@@ -114,9 +113,6 @@ def build_dossier(
         if ip_rows:
             ip = ip_rows[0].get("ip")
 
-    # Time bounds across both as-src and as-tgt traffic — cheaper to do via
-    # the helper than to pull every payload.
-    src_bounds = index.time_bounds(since=since) if False else None  # always recompute below
     rows_for_radio = index.query(src=radio_id, since=since, limit=10_000_000)
 
     voice_rows = [r for r in rows_for_radio if r.get("type") == "voice_call"]

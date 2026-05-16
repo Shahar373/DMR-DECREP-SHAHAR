@@ -274,6 +274,12 @@ function fmtTime(iso) {
   return iso.replace('T', ' ').split('.')[0];
 }
 
+function escapeHTML(s) {
+  return String(s ?? '').replace(/[&<>"']/g, c => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+  }[c]));
+}
+
 function getSrcOrRadio(ev) {
   if (ev.src != null) return ev.src;
   if (ev.radio_id != null) return ev.radio_id;
@@ -289,19 +295,20 @@ function render(events) {
     const src = getSrcOrRadio(ev);
     const tgt = ev.tgt;
     const slot = ev.slot;
-    const raw = (ev.raw_line || '').replace(/[<>]/g, '');
+    const raw = escapeHTML(ev.raw_line || '');
+    const evType = escapeHTML(ev.type);
     return `
       <tr>
-        <td class="t-time">${fmtTime(ev.timestamp)}</td>
-        <td><span class="t-type ${ev.type}">${ev.type}</span></td>
+        <td class="t-time">${escapeHTML(fmtTime(ev.timestamp))}</td>
+        <td><span class="t-type ${evType}">${evType}</span></td>
         <td>${src != null
-          ? `<a href="/?dossier=${src}" title="Open Dossier"
-                style="color:var(--blue);text-decoration:none">${src}</a>`
+          ? `<a href="/?dossier=${encodeURIComponent(src)}" title="Open Dossier"
+                style="color:var(--blue);text-decoration:none">${escapeHTML(src)}</a>`
           : '<span class="muted">—</span>'}</td>
-        <td>${tgt ?? '<span class="muted">—</span>'}</td>
-        <td>${slot ?? '<span class="muted">—</span>'}</td>
-        <td>${describe(ev)}</td>
-        <td class="t-raw" title="${raw.replace(/"/g, '&quot;')}">${raw}</td>
+        <td>${tgt != null ? escapeHTML(tgt) : '<span class="muted">—</span>'}</td>
+        <td>${slot != null ? escapeHTML(slot) : '<span class="muted">—</span>'}</td>
+        <td>${escapeHTML(describe(ev))}</td>
+        <td class="t-raw" title="${raw}">${raw}</td>
       </tr>`;
   }).join('');
 }

@@ -76,7 +76,8 @@ async def stream_subprocess(
         stderr=asyncio.subprocess.PIPE,
         env=env,
     )
-    assert proc.stderr is not None
+    if proc.stderr is None:
+        raise RuntimeError("failed to capture subprocess stderr")
 
     async def _terminate_on_stop() -> None:
         if stop_event is None:

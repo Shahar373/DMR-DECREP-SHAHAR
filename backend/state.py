@@ -137,6 +137,11 @@ class StateManager:
         self.quality.total_events_seen += 1
         self._last_event_at = event.timestamp
 
+        # Auto-tick BEFORE the handler so a voice frame arriving after a long
+        # gap sees the stale call as already expired and starts a fresh one
+        # (otherwise the encryption flag and frame_count would leak across).
+        self._expire_idle_calls(event.timestamp)
+
         et = event.type
         if et == EventType.VOICE_CALL:
             self._on_voice_call(event)
@@ -162,9 +167,6 @@ class StateManager:
             self._on_bank_call(event)
         elif et == EventType.QUALITY:
             self._on_quality(event)
-
-        # Auto-tick on each event so idle calls expire while replaying a log.
-        self._expire_idle_calls(event.timestamp)
 
     def tick(self, now: datetime) -> None:
         """Manually expire idle calls — useful when no events are flowing."""
@@ -251,9 +253,6 @@ class StateManager:
         radio.voice_frame_count += 1
         radio.last_tg = ev.tgt
         radio.last_slot = ev.slot
-        # New encryption status is reset to False here; an EncryptionEvent on
-        # the same slot will flip it back to True for the current call.
-        radio.last_call_was_encrypted = False
 
         existing = self.active_calls.get(ev.slot)
         if existing is not None and existing.src == ev.src and existing.tgt == ev.tgt:
@@ -267,6 +266,9 @@ class StateManager:
                     self._on_call_end(existing)
                 except Exception:
                     pass
+            # A new keyup starts unencrypted; a later EncryptionEvent on this
+            # slot will flip last_call_was_encrypted back to True.
+            radio.last_call_was_encrypted = False
             new_call = ActiveCall(
                 slot=ev.slot,
                 src=ev.src,

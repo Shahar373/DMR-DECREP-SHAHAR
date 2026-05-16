@@ -89,15 +89,15 @@ def compute_talker_pairs(
         # Last-seen: ISO strings sort lexicographically.
         if ts > radio_last_seen.get(src, ""):
             radio_last_seen[src] = ts
-        if et == "voice_call":
-            # Encrypted is tracked per-call elsewhere; we don't have the
-            # encryption flag inline. For now, leave encrypted_call_count
-            # at 0 unless extended. (Will be populated by a side query.)
-            pass
         if kind == "group":
             tg_radio_count[tgt][src] += 1
         elif kind == "private":
             private_pair[(src, tgt)] += 1
+            # For private edges tgt is a radio id, not a TG — credit it too
+            # so it doesn't show up as a node with total_calls=0.
+            radio_total_calls[tgt] += 1
+            if ts > radio_last_seen.get(tgt, ""):
+                radio_last_seen[tgt] = ts
 
     # Build group edges: for each TG, every pair of distinct radios.
     group_weights: dict[tuple[int, int], int] = defaultdict(int)

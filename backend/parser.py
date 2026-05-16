@@ -21,7 +21,7 @@ parser strips ANSI/CSI/charset-designate sequences before matching.
 from __future__ import annotations
 
 import re
-from datetime import datetime, time
+from datetime import datetime, time, timedelta
 from typing import Callable, Optional, Pattern
 
 from .models import (
@@ -199,8 +199,16 @@ class DSDLogParser:
 
     def _update_timestamp(self, m: re.Match[str]) -> None:
         h, mi, s = int(m.group("h")), int(m.group("m")), int(m.group("s"))
-        # Log lines carry only HH:MM:SS; combine with today's local date.
-        self._last_timestamp = datetime.combine(datetime.now().date(), time(h, mi, s))
+        # Log lines carry only HH:MM:SS; pin the date from the previous sync
+        # and advance it when the wall clock wraps past midnight.
+        prev = self._last_timestamp
+        if prev is None:
+            base_date = datetime.now().date()
+        else:
+            base_date = prev.date()
+            if (h, mi, s) < (prev.hour, prev.minute, prev.second):
+                base_date = base_date + timedelta(days=1)
+        self._last_timestamp = datetime.combine(base_date, time(h, mi, s))
 
     def _now(self) -> datetime:
         return self._last_timestamp or datetime.now()

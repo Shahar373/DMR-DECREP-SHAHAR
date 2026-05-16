@@ -292,8 +292,6 @@ class EventIndex:
         with self._lock:
             self._commit_locked()
             row = self._conn.execute(sql, params).fetchone()
-        if row is None:
-            return None, None
         return row[0], row[1]
 
     # --- maintenance ---

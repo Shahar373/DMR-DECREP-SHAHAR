@@ -344,9 +344,16 @@ class EventLog:
         type_set = {str(t) for t in types} if types else None
         with self._lock:
             snapshot = list(self._buf)
-        for ev in snapshot:
-            if since is not None and ev.timestamp < since:
-                continue
+        # Events are appended chronologically, so once we cross `since` no
+        # earlier entry can match. Skip the prefix in one shot.
+        start = 0
+        if since is not None:
+            for start, ev in enumerate(snapshot):
+                if ev.timestamp >= since:
+                    break
+            else:
+                start = len(snapshot)
+        for ev in snapshot[start:]:
             if type_set is not None and ev.type.value not in type_set:
                 continue
             writer.writerow(_row_from_event(ev))
@@ -526,17 +533,17 @@ def quality_ratios_over_window(
             sample += v
         for k, v in index.count_quality_by_kind(since=since).items():
             quality[k] = v
-        bounds = index.time_bounds(since=since)
-        for raw in bounds:
-            if isinstance(raw, str):
-                try:
-                    ts = datetime.fromisoformat(raw)
-                except ValueError:
-                    continue
-                if earliest is None or ts < earliest:
-                    earliest = ts
-                if latest is None or ts > latest:
-                    latest = ts
+        min_ts, max_ts = index.time_bounds(since=since)
+        if isinstance(min_ts, str):
+            try:
+                earliest = datetime.fromisoformat(min_ts)
+            except ValueError:
+                pass
+        if isinstance(max_ts, str):
+            try:
+                latest = datetime.fromisoformat(max_ts)
+            except ValueError:
+                pass
     elif jsonl_path is not None and jsonl_path.exists():
         for obj in stream_history(jsonl_path, since=since):
             sample += 1
