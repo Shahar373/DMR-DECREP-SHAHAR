@@ -1034,7 +1034,7 @@ function renderDossier(d) {
 
   const calls = (d.recent_calls || []).map(c => {
     const rec = c.recording
-      ? `<audio controls preload="none" src="/recordings/${c.recording.filename}"></audio>`
+      ? `<audio controls preload="none" src="/recordings/${encodeURIComponent(c.recording.filename)}"></audio>`
       : '<span class="muted" style="font-size:10px">no recording</span>';
     return `<div class="recording-row">
       <div class="meta"><span>${fmtTs(c.ts)} · slot ${c.slot} → TG ${c.tgt}</span>

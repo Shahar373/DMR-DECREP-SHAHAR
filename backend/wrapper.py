@@ -92,6 +92,12 @@ async def stream_subprocess(
             yield raw.decode("utf-8", errors="replace")
     finally:
         watcher.cancel()
+        # Await the cancellation so asyncio doesn't emit
+        # "Task was destroyed but it is pending" on shutdown.
+        try:
+            await watcher
+        except (asyncio.CancelledError, Exception):  # noqa: BLE001
+            pass
         if proc.returncode is None:
             proc.terminate()
             try:

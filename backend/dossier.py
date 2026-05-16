@@ -63,28 +63,30 @@ def _group_calls(voice_rows: list[dict]) -> list[dict]:
     return sessions
 
 
-def _attach_recording(call: dict, recordings) -> Optional[dict]:
-    """Find a CallRecording within ±5s of the call start. Best-effort."""
-    if recordings is None:
+def _attach_recording(call: dict, recordings_list) -> Optional[dict]:
+    """Find a CallRecording within ±5s of the call start. Best-effort.
+
+    ``recordings_list`` is a pre-fetched list (one ``list_recent()`` scan
+    re-used across all sessions in a dossier — re-scanning per session is
+    O(N*M) on a busy day's worth of WAVs).
+    """
+    if not recordings_list:
         return None
     try:
         call_ts = datetime.fromisoformat(call["ts"])
     except (TypeError, ValueError):
         return None
-    try:
-        for rec in recordings.list_recent():
-            if rec.src is not None and rec.src != call["src"]:
-                continue
-            if rec.tgt is not None and rec.tgt != call["tgt"]:
-                continue
-            gap = abs((rec.started_at - call_ts).total_seconds())
-            if gap <= 5.0:
-                return {
-                    "filename": rec.filename,
-                    "duration_s": rec.duration_seconds,
-                }
-    except Exception:  # noqa: BLE001
-        return None
+    for rec in recordings_list:
+        if rec.src is not None and rec.src != call["src"]:
+            continue
+        if rec.tgt is not None and rec.tgt != call["tgt"]:
+            continue
+        gap = abs((rec.started_at - call_ts).total_seconds())
+        if gap <= 5.0:
+            return {
+                "filename": rec.filename,
+                "duration_s": rec.duration_seconds,
+            }
     return None
 
 
@@ -113,9 +115,14 @@ def build_dossier(
         if ip_rows:
             ip = ip_rows[0].get("ip")
 
-    rows_for_radio = index.query(src=radio_id, since=since, limit=10_000_000)
+    rows_as_src = index.query(src=radio_id, since=since, limit=10_000_000)
+    # Also include events where this radio is the *target* (e.g. private data
+    # headers or LRRP requests addressed to it) — otherwise a radio that only
+    # appears as a recipient passes the existence check above but ends up with
+    # first_seen=None/last_seen=None/empty hourly.
+    rows_as_tgt = index.query(tgt=radio_id, since=since, limit=10_000_000)
 
-    voice_rows = [r for r in rows_for_radio if r.get("type") == "voice_call"]
+    voice_rows = [r for r in rows_as_src if r.get("type") == "voice_call"]
     voice_rows.sort(key=lambda r: r.get("timestamp", ""))
 
     tg_counts: Counter[int] = Counter()
@@ -124,9 +131,20 @@ def build_dossier(
         if tg is not None:
             tg_counts[tg] += 1
 
-    # Hourly histogram (24 buckets, indexed by hour-of-day in local time).
+    # Hourly histogram + lifetime bounds: union of src-side and tgt-side rows,
+    # de-duplicated by (timestamp, type) so an event isn't double-counted if
+    # the radio is both src and tgt of the same row (rare but legal).
+    seen_keys: set[tuple] = set()
+    all_radio_rows: list[dict] = []
+    for r in (*rows_as_src, *rows_as_tgt):
+        key = (r.get("timestamp"), r.get("type"), r.get("src"), r.get("tgt"))
+        if key in seen_keys:
+            continue
+        seen_keys.add(key)
+        all_radio_rows.append(r)
+
     hourly = [0] * 24
-    for r in rows_for_radio:
+    for r in all_radio_rows:
         ts_raw = r.get("timestamp", "")
         try:
             hourly[datetime.fromisoformat(ts_raw).hour] += 1
@@ -143,6 +161,14 @@ def build_dossier(
 
     # Recent calls — collapse into sessions, attach a recording where present.
     sessions = _group_calls(voice_rows)
+    # Snapshot the recordings list once and re-use across all sessions: each
+    # ``list_recent()`` rescans the dir and parses every WAV header.
+    recordings_list = None
+    if recordings is not None:
+        try:
+            recordings_list = recordings.list_recent()
+        except Exception:  # noqa: BLE001 — recording lookup must never break dossier
+            recordings_list = None
     recent_calls = []
     for s in sessions[-20:]:
         recent_calls.append({
@@ -150,7 +176,7 @@ def build_dossier(
             "frames": s["frames"],
             # Approx call duration: ~60 ms per voice frame.
             "duration_s": round(s["frames"] * 0.06, 2),
-            "recording": _attach_recording(s, recordings),
+            "recording": _attach_recording(s, recordings_list),
         })
     recent_calls.reverse()  # newest first
 
@@ -172,7 +198,7 @@ def build_dossier(
     co_talkers = co_talkers[:10]
 
     # Lifetime bounds and totals — single passes over the in-memory list.
-    all_ts = [r.get("timestamp") for r in rows_for_radio if r.get("timestamp")]
+    all_ts = [r.get("timestamp") for r in all_radio_rows if r.get("timestamp")]
     first_seen = min(all_ts) if all_ts else None
     last_seen = max(all_ts) if all_ts else None
     total_calls = len(sessions)

@@ -10,6 +10,7 @@ from backend import server as srv
 from backend.dossier import _group_calls, build_dossier
 from backend.event_log import EventLog
 from backend.models import (
+    DataHeaderEvent,
     EncryptionEvent,
     IPMappingEvent,
     LRRPPositionEvent,
@@ -107,6 +108,29 @@ def test_dossier_unknown_returns_none(tmp_path: Path) -> None:
     finally:
         log.close()
     assert d is None
+
+
+def test_dossier_radio_only_seen_as_target_still_has_lifetime_bounds(tmp_path: Path) -> None:
+    """A radio that only appears as the TGT of private events (data headers
+    addressed to it) should still get a populated dossier — first_seen and
+    last_seen used to come back None because we only queried src=radio_id."""
+    log = EventLog(jsonl_path=tmp_path / "events.jsonl", capacity=200)
+    try:
+        # Radio 555 appears only as the recipient — never as src.
+        for i in range(3):
+            log.append(DataHeaderEvent(
+                timestamp=_ts(i), raw_line="dh",
+                slot=1, addressing="Indiv", delivery="Confirmed Delivery",
+                src=100, tgt=555,
+            ))
+        d = build_dossier(log.index, 555, window_seconds=24 * 3600, now=_ts(10))
+    finally:
+        log.close()
+    assert d is not None
+    assert d["first_seen"] is not None
+    assert d["last_seen"] is not None
+    # Hourly histogram should pick up the activity hour.
+    assert sum(d["hourly_activity"]) == 3
 
 
 def test_dossier_window_excludes_old_events(tmp_path: Path) -> None:
