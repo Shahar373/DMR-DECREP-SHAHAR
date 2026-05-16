@@ -266,6 +266,34 @@ async def history_csv(
     )
 
 
+@app.get("/api/network")
+async def network_graph(
+    window: int = Query(3600, ge=60, le=7 * 86400),
+    min_weight: int = Query(2, ge=1),
+    limit: int = Query(500, ge=1, le=5000),
+):
+    """Talker-Pair Graph over a rolling window.
+
+    Returns ``{nodes, edges, window_seconds, generated_at}``. ``nodes`` are
+    only radios that participate in at least one surviving edge. ``edges``
+    have ``kind ∈ {group, private}`` so the UI can colour them differently.
+    """
+    from .network import compute_talker_pairs
+
+    idx = _prefer_index()
+    if idx is None:
+        return {"nodes": [], "edges": [], "window_seconds": window,
+                "generated_at": datetime.now().isoformat()}
+    return compute_talker_pairs(
+        idx, window_seconds=window, min_weight=min_weight, limit=limit,
+    )
+
+
+@app.get("/network")
+async def network_page():
+    return HTMLResponse((FRONTEND_DIR / "network.html").read_text(encoding="utf-8"))
+
+
 @app.get("/stats")
 async def stats_page():
     return HTMLResponse((FRONTEND_DIR / "stats.html").read_text(encoding="utf-8"))

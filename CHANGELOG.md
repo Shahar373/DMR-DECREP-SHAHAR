@@ -9,6 +9,28 @@ Versioning follows [Semantic Versioning](https://semver.org/):
 Source of truth: `backend/__init__.py` (`__version__`). The dashboard
 footer shows the running build's version and `/api/version` exposes it.
 
+## [0.10.0] — 2026-05-16
+
+### Added
+- **Talker-Pair Graph** at `/network` — interactive cytoscape.js graph of
+  which radios talk to which. Two edge kinds, coloured separately:
+  * **group co-presence** (blue) — two radios that keyed up on the same TG
+    or sent group CSBKs to it. Weight is the sum over shared TGs of
+    `min(count_a_on_tg, count_b_on_tg)`, which rewards mutual participation.
+  * **private direct** (orange, dashed) — Individual CSBKs, Individual data
+    headers, and LRRP requests. Weight collapses both directions.
+- `GET /api/network?window=SECONDS&min_weight=N&limit=N` — JSON
+  `{nodes, edges, window_seconds, generated_at}`. Nodes carry
+  `total_calls`, `last_seen`, `has_gps`; edges carry `weight`, `kind`,
+  shared `tgs`. `src=0` (DSD-FME pre-LC placeholder) is filtered out.
+- `backend/network.py` with `compute_talker_pairs(index, …)` — uses the
+  SQLite sidecar from v0.9.0, so a graph render is one indexed SELECT.
+- Window dropdown (5m / 15m / 1h / 6h / 24h) and min-weight slider on
+  the page; the right-side panel lists the top 25 edges as a non-graph
+  fallback. Clicking a node deep-links to `/?dossier=<id>` (Phase 3
+  forward-declared).
+- `/network` link added to the nav on every page.
+
 ## [0.9.0] — 2026-05-16
 
 ### Added
