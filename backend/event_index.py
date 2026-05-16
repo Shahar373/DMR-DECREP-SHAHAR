@@ -298,13 +298,25 @@ class EventIndex:
 
     # --- maintenance ---
 
-    def rebuild_from_jsonl(self, jsonl_path: Path) -> int:
+    def rebuild_from_jsonl(self, jsonl_path: Path, progress_every: int = 100_000) -> int:
         """Drop the events table and replay every line from the JSONL.
 
         Used by ``--rebuild-index`` and by recovery flows when the index is
         out of sync. Returns the number of rows inserted.
+
+        Performance notes for slow SD cards (Pi):
+        * inserts are batched via ``executemany`` (5 000 rows per batch)
+        * the JSONL's raw line is stored verbatim as the ``payload`` column
+          (no second ``json.dumps`` round-trip)
+        * progress is printed to stderr every ``progress_every`` rows so the
+          operator sees that it's working
         """
+        import sys as _sys
+        import time as _time
+
         jsonl_path = Path(jsonl_path)
+        BATCH = 5_000
+        batch: list[tuple] = []
         with self._lock:
             self._commit_locked()
             self._conn.execute("DROP TABLE IF EXISTS events")
@@ -323,23 +335,53 @@ class EventIndex:
             )
             self.index_outdated = False
             count = 0
+            t0 = _time.monotonic()
             if jsonl_path.exists():
                 with open(jsonl_path, "r", encoding="utf-8", errors="replace") as f:
                     for raw in f:
-                        raw = raw.strip()
-                        if not raw:
+                        stripped = raw.strip()
+                        if not stripped:
                             continue
                         try:
-                            obj = json.loads(raw)
+                            obj = json.loads(stripped)
                         except json.JSONDecodeError:
                             continue
                         if not obj.get("timestamp") or not obj.get("type"):
                             continue
-                        try:
-                            self._conn.execute(_INSERT_SQL, _extract_columns(obj))
-                            count += 1
-                        except sqlite3.Error:
-                            continue
+                        et = obj.get("type", "")
+                        src = obj.get("src")
+                        if src is None and et == "ip_mapping":
+                            src = obj.get("radio_id")
+                        error_type = obj.get("error_type") if et == "quality" else None
+                        encrypted = 1 if et == "encryption" else None
+                        # Reuse the raw line verbatim — no re-serialisation cost.
+                        batch.append((
+                            obj.get("timestamp", ""),
+                            et,
+                            src,
+                            obj.get("tgt"),
+                            obj.get("slot"),
+                            obj.get("addressing"),
+                            error_type,
+                            encrypted,
+                            int(obj.get("schema_version", 1)),
+                            stripped,
+                        ))
+                        if len(batch) >= BATCH:
+                            self._conn.executemany(_INSERT_SQL, batch)
+                            count += len(batch)
+                            batch.clear()
+                            if count % progress_every == 0:
+                                elapsed = _time.monotonic() - t0
+                                rate = count / elapsed if elapsed else 0
+                                print(
+                                    f"# rebuild: {count:>9,} rows ({rate:,.0f}/s)",
+                                    file=_sys.stderr,
+                                )
+                    if batch:
+                        self._conn.executemany(_INSERT_SQL, batch)
+                        count += len(batch)
+                        batch.clear()
             self._conn.commit()
         return count
 
