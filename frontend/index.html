@@ -322,6 +322,36 @@ tr.has-gps { cursor: pointer; }
 .dossier-panel .recording-row { padding: 6px 0; border-bottom: 1px dashed var(--border); }
 .dossier-panel .recording-row:last-child { border-bottom: none; }
 .dossier-panel .recording-row .meta { display: flex; justify-content: space-between; }
+
+/* ── Alerts toast bar ──────────────────────────────────────────────── */
+#toast-bar {
+  position: fixed; top: 56px; right: 14px; z-index: 2000;
+  display: flex; flex-direction: column; gap: 6px;
+  max-width: 380px; pointer-events: none;
+}
+.toast {
+  background: var(--bg2); border: 1px solid var(--border);
+  border-left: 4px solid var(--yellow);
+  border-radius: 4px; padding: 8px 32px 8px 12px; font-size: 12px;
+  box-shadow: 0 4px 18px rgba(0,0,0,0.45); pointer-events: auto;
+  position: relative; transition: opacity 200ms, transform 200ms;
+  opacity: 0; transform: translateX(20px);
+}
+.toast.show { opacity: 1; transform: translateX(0); }
+.toast.fade { opacity: 0; transform: translateX(20px); }
+.toast.radio_keyup     { border-left-color: var(--green); }
+.toast.encryption      { border-left-color: var(--purple); }
+.toast.cc_silent       { border-left-color: var(--red); }
+.toast.quality_spike   { border-left-color: var(--red); }
+.toast .t-name { font-weight: 700; color: var(--text); margin-bottom: 2px; }
+.toast .t-msg  { color: var(--muted); font-size: 11px; line-height: 1.35; }
+.toast .t-time { color: var(--muted); font-size: 10px; margin-top: 3px; }
+.toast .t-x {
+  position: absolute; top: 4px; right: 6px;
+  background: none; border: none; color: var(--muted);
+  cursor: pointer; font-size: 14px; line-height: 1;
+}
+.toast .t-x:hover { color: var(--red); }
 </style>
 </head>
 <body>
@@ -334,6 +364,7 @@ tr.has-gps { cursor: pointer; }
     <a href="/debrief" style="color:var(--muted);text-decoration:none">Debrief</a>
     <a href="/stats" style="color:var(--muted);text-decoration:none">Stats</a>
     <a href="/network" style="color:var(--muted);text-decoration:none">Network</a>
+    <a href="/alerts" style="color:var(--muted);text-decoration:none">Alerts</a>
   </nav>
   <div class="hitem">Site: <span id="h-site">—</span></div>
   <div class="hitem">Rest LSN: <span id="h-rest">—</span></div>
@@ -432,6 +463,9 @@ tr.has-gps { cursor: pointer; }
   <div style="margin-left:auto">Updated: <span id="q-ts">—</span></div>
   <div id="version-tag" title="App version">v—</div>
 </div>
+
+<!-- Alerts toast bar -->
+<div id="toast-bar"></div>
 
 <!-- Per-radio Dossier slide-in panel -->
 <div id="dossier-backdrop" class="dossier-backdrop"></div>
@@ -1132,6 +1166,77 @@ renderRadios = function(snap) {
     firstCell.appendChild(btn);
   });
 };
+
+// ── Alerts toast bar ──────────────────────────────────────────────
+const _toastBar = document.getElementById('toast-bar');
+const _toastSeen = new Set();
+let _alertsWs = null;
+let _alertsReconnect = 1000;
+function _escHTML(s) {
+  return String(s ?? '').replace(/[&<>"']/g, c => ({
+    '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+function _toastTime(iso) {
+  if (!iso) return '';
+  return new Date(iso).toLocaleTimeString('en-GB', { hour12: false });
+}
+function showAlertToast(firing) {
+  // De-dupe replayed firings (server sends recent firings on connect).
+  const key = firing.rule_id + '@' + firing.fired_at;
+  if (_toastSeen.has(key)) return;
+  _toastSeen.add(key);
+  if (_toastSeen.size > 200) _toastSeen.clear();
+
+  const el = document.createElement('div');
+  el.className = 'toast ' + (firing.kind || '');
+  el.innerHTML =
+    `<button class="t-x" title="dismiss">×</button>` +
+    `<div class="t-name">${_escHTML(firing.rule_name || firing.kind)}</div>` +
+    `<div class="t-msg">${_escHTML(firing.message)}</div>` +
+    `<div class="t-time">${_escHTML(_toastTime(firing.fired_at))} · ${_escHTML(firing.kind)}</div>`;
+  el.querySelector('.t-x').addEventListener('click', () => dismiss());
+  _toastBar.appendChild(el);
+  // Cap visible toasts at 5 — oldest fades out first.
+  while (_toastBar.children.length > 5) _toastBar.firstChild.remove();
+  requestAnimationFrame(() => el.classList.add('show'));
+  let dismissed = false;
+  function dismiss() {
+    if (dismissed) return;
+    dismissed = true;
+    el.classList.remove('show');
+    el.classList.add('fade');
+    setTimeout(() => el.remove(), 220);
+  }
+  setTimeout(dismiss, 12000);
+
+  // Best-effort browser Notification (user must grant permission once).
+  if ('Notification' in window && Notification.permission === 'granted'
+      && document.hidden) {
+    try {
+      new Notification(firing.rule_name || 'DMR alert',
+        { body: firing.message, tag: firing.rule_id });
+    } catch (_) {}
+  }
+}
+function _connectAlertsWs() {
+  const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+  _alertsWs = new WebSocket(`${proto}://${location.host}/ws/alerts`);
+  _alertsWs.onopen = () => { _alertsReconnect = 1000; };
+  _alertsWs.onmessage = e => {
+    try { showAlertToast(JSON.parse(e.data)); } catch (_) {}
+  };
+  _alertsWs.onclose = _alertsWs.onerror = () => {
+    setTimeout(() => {
+      _alertsReconnect = Math.min(_alertsReconnect * 2, 16000);
+      _connectAlertsWs();
+    }, _alertsReconnect);
+  };
+}
+_connectAlertsWs();
+// Ask once for desktop-notification permission (no nagging on reload).
+if ('Notification' in window && Notification.permission === 'default') {
+  setTimeout(() => Notification.requestPermission().catch(() => {}), 3000);
+}
 
 // Deep-link: /?dossier=68 auto-opens after first snapshot.
 {

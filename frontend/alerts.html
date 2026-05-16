@@ -1,0 +1,324 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>DMR Cap+ — Alerts</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+:root {
+  --bg: #0d1117; --bg2: #161b22; --bg3: #21262d; --border: #30363d;
+  --text: #e6edf3; --muted: #8b949e;
+  --green: #3fb950; --blue: #58a6ff; --yellow: #d29922;
+  --red: #f85149; --purple: #bc8cff;
+}
+body { font-family: ui-monospace, 'Cascadia Code', monospace;
+       background: var(--bg); color: var(--text); font-size: 13px;
+       min-height: 100vh; }
+header {
+  background: var(--bg2); border-bottom: 1px solid var(--border);
+  padding: 10px 16px; display: flex; align-items: center; gap: 16px;
+}
+header h1 { font-size: 14px; font-weight: 700; color: var(--blue); }
+header .nav a {
+  color: var(--muted); text-decoration: none; margin-right: 12px; font-size: 12px;
+}
+header .nav a:hover, header .nav a.active { color: var(--blue); }
+header .meta { margin-left: auto; color: var(--muted); font-size: 11px; }
+
+main { padding: 16px; display: grid; gap: 16px;
+       grid-template-columns: minmax(380px, 1fr) minmax(420px, 2fr);
+       max-width: 1400px; margin: 0 auto; }
+.card {
+  background: var(--bg2); border: 1px solid var(--border); border-radius: 6px;
+  padding: 14px 16px;
+}
+.card h2 {
+  font-size: 11px; color: var(--muted); text-transform: uppercase;
+  letter-spacing: .05em; margin-bottom: 10px;
+}
+label { display: block; color: var(--muted); font-size: 11px;
+        margin: 8px 0 3px; }
+input, select, button, textarea {
+  background: var(--bg3); color: var(--text);
+  border: 1px solid var(--border); border-radius: 3px;
+  padding: 5px 8px; font-family: inherit; font-size: 12px;
+}
+input[type="number"], input[type="text"] { width: 100%; }
+button { cursor: pointer; }
+button.primary { background: #1c2d45; border-color: var(--blue); color: var(--blue); }
+button.primary:hover { background: #2a3f5c; }
+button.danger:hover { color: var(--red); border-color: var(--red); }
+.row-actions { display: flex; gap: 6px; }
+
+table { width: 100%; border-collapse: collapse; }
+th, td { padding: 6px 8px; text-align: left; font-size: 12px;
+         border-bottom: 1px solid var(--border); vertical-align: middle; }
+th { font-size: 10px; color: var(--muted); text-transform: uppercase;
+     letter-spacing: .05em; font-weight: 600; }
+.kind-pill {
+  display: inline-block; padding: 1px 6px; border-radius: 3px;
+  font-size: 10px; font-weight: 600; border: 1px solid;
+}
+.kind-pill.radio_keyup   { color: var(--green);  border-color: var(--green); }
+.kind-pill.encryption    { color: var(--purple); border-color: var(--purple); }
+.kind-pill.cc_silent     { color: var(--red);    border-color: var(--red); }
+.kind-pill.quality_spike { color: var(--red);    border-color: var(--red); }
+.muted { color: var(--muted); }
+.empty { color: var(--muted); padding: 30px; text-align: center; }
+
+#firings .firing {
+  padding: 8px; border: 1px solid var(--border); border-radius: 4px;
+  border-left: 3px solid var(--yellow); margin-bottom: 6px;
+}
+#firings .firing.radio_keyup   { border-left-color: var(--green); }
+#firings .firing.encryption    { border-left-color: var(--purple); }
+#firings .firing.cc_silent     { border-left-color: var(--red); }
+#firings .firing.quality_spike { border-left-color: var(--red); }
+#firings .f-name { font-weight: 700; }
+#firings .f-msg  { color: var(--muted); font-size: 11px; }
+#firings .f-time { color: var(--muted); font-size: 10px; }
+
+.kind-form { display: none; padding-top: 4px; }
+.kind-form.active { display: block; }
+.help { color: var(--muted); font-size: 10px; margin-top: 2px; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>DMR Cap+ Alerts</h1>
+  <nav class="nav">
+    <a href="/">Live</a>
+    <a href="/debrief">Debrief</a>
+    <a href="/stats">Stats</a>
+    <a href="/network">Network</a>
+    <a href="/alerts" class="active">Alerts</a>
+  </nav>
+  <div class="meta">
+    Rules: <span id="m-rules">—</span> ·
+    Firings (live): <span id="m-firings">—</span> ·
+    <span id="m-version"></span>
+  </div>
+</header>
+
+<main>
+  <div class="card">
+    <h2>New rule</h2>
+    <label for="r-kind">Kind</label>
+    <select id="r-kind">
+      <option value="radio_keyup">radio_keyup — watchlist</option>
+      <option value="encryption">encryption — encrypted call</option>
+      <option value="cc_silent">cc_silent — control channel quiet</option>
+      <option value="quality_spike">quality_spike — CRC rate over threshold</option>
+    </select>
+
+    <label for="r-name">Name</label>
+    <input id="r-name" type="text" placeholder="e.g. Watch radio 2102">
+
+    <label for="r-cooldown">Cooldown (seconds)</label>
+    <input id="r-cooldown" type="number" min="0" value="60">
+
+    <!-- radio_keyup -->
+    <div class="kind-form" data-kind="radio_keyup">
+      <label for="rf-radios">Radio IDs (comma-separated)</label>
+      <input id="rf-radios" type="text" placeholder="2102,223,64250">
+    </div>
+
+    <!-- encryption -->
+    <div class="kind-form" data-kind="encryption">
+      <label for="rf-tgs">TG IDs (comma-separated, empty = any)</label>
+      <input id="rf-tgs" type="text" placeholder="e.g. 1,9,64250 — or leave blank">
+    </div>
+
+    <!-- cc_silent -->
+    <div class="kind-form" data-kind="cc_silent">
+      <label for="rf-cc-timeout">Silent timeout (seconds)</label>
+      <input id="rf-cc-timeout" type="number" min="5" value="30">
+      <div class="help">Fires once when the control channel has been quiet
+        this long; re-arms when CC traffic returns.</div>
+    </div>
+
+    <!-- quality_spike -->
+    <div class="kind-form" data-kind="quality_spike">
+      <label for="rf-qs-window">Window (seconds)</label>
+      <input id="rf-qs-window" type="number" min="10" value="60">
+      <label for="rf-qs-rate">Rate threshold (0–1)</label>
+      <input id="rf-qs-rate" type="number" min="0.001" max="1" step="0.01" value="0.05">
+      <div class="help">0.05 = 5% — matches the "marginal" verdict band.</div>
+    </div>
+
+    <div style="margin-top:12px"><button class="primary" id="r-save">Add rule</button></div>
+    <div id="r-error" style="color:var(--red);font-size:11px;margin-top:6px"></div>
+  </div>
+
+  <div>
+    <div class="card" style="margin-bottom:16px">
+      <h2>Active rules</h2>
+      <div id="rules-wrap"><div class="empty">Loading…</div></div>
+    </div>
+    <div class="card">
+      <h2>Recent firings</h2>
+      <div id="firings"><div class="empty">No firings yet.</div></div>
+    </div>
+  </div>
+</main>
+
+<script>
+const $ = id => document.getElementById(id);
+const escHTML = s => String(s ?? '').replace(/[&<>"']/g, c => (
+  {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const fmtTs = s => s ? String(s).split('.')[0].replace('T', ' ') : '—';
+const parseIds = s => (s || '').split(',')
+  .map(x => x.trim()).filter(Boolean)
+  .map(x => parseInt(x, 10)).filter(n => Number.isFinite(n));
+
+function switchKindForm() {
+  const k = $('r-kind').value;
+  document.querySelectorAll('.kind-form').forEach(el => {
+    el.classList.toggle('active', el.dataset.kind === k);
+  });
+}
+$('r-kind').addEventListener('change', switchKindForm);
+switchKindForm();
+
+async function loadRules() {
+  const r = await fetch('/api/alerts/rules');
+  if (!r.ok) return;
+  const data = await r.json();
+  const rules = data.rules || [];
+  $('m-rules').textContent = rules.length;
+  const wrap = $('rules-wrap');
+  if (!rules.length) {
+    wrap.innerHTML = '<div class="empty">No rules yet — add one on the left.</div>';
+    return;
+  }
+  wrap.innerHTML = `<table>
+    <thead><tr><th>Kind</th><th>Name</th><th>Detail</th><th>Cooldown</th><th></th><th></th></tr></thead>
+    <tbody>` + rules.map(r => `
+      <tr data-id="${escHTML(r.id)}">
+        <td><span class="kind-pill ${r.kind}">${r.kind}</span></td>
+        <td>${escHTML(r.name)}</td>
+        <td class="muted">${escHTML(detailFor(r))}</td>
+        <td class="muted">${r.cooldown_seconds}s</td>
+        <td>
+          <label style="font-size:11px;color:var(--muted)">
+            <input type="checkbox" class="r-en" ${r.enabled ? 'checked' : ''}> enabled
+          </label>
+        </td>
+        <td><button class="danger r-del">delete</button></td>
+      </tr>`).join('') + '</tbody></table>';
+  wrap.querySelectorAll('.r-del').forEach(btn => {
+    btn.addEventListener('click', async ev => {
+      const id = ev.target.closest('tr').dataset.id;
+      await fetch('/api/alerts/rules/' + encodeURIComponent(id), { method: 'DELETE' });
+      loadRules();
+    });
+  });
+  wrap.querySelectorAll('.r-en').forEach(cb => {
+    cb.addEventListener('change', async ev => {
+      const id = ev.target.closest('tr').dataset.id;
+      await fetch('/api/alerts/rules/' + encodeURIComponent(id) + '/toggle', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({enabled: ev.target.checked}),
+      });
+    });
+  });
+}
+
+function detailFor(r) {
+  switch (r.kind) {
+    case 'radio_keyup':   return `radios: ${(r.radio_ids||[]).join(', ')}`;
+    case 'encryption':    return r.tg_ids?.length ? `TGs: ${r.tg_ids.join(', ')}` : 'any TG';
+    case 'cc_silent':     return `${r.timeout_seconds}s timeout`;
+    case 'quality_spike': return `${r.window_seconds}s window · ≥${(r.rate_threshold*100).toFixed(1)}%`;
+    default:              return '';
+  }
+}
+
+$('r-save').addEventListener('click', async () => {
+  $('r-error').textContent = '';
+  const kind = $('r-kind').value;
+  const body = {
+    kind, name: $('r-name').value.trim() || kind,
+    cooldown_seconds: parseInt($('r-cooldown').value, 10) || 0,
+  };
+  if (kind === 'radio_keyup') {
+    body.radio_ids = parseIds($('rf-radios').value);
+    if (!body.radio_ids.length) { $('r-error').textContent = 'Need at least one radio id.'; return; }
+  } else if (kind === 'encryption') {
+    body.tg_ids = parseIds($('rf-tgs').value);
+  } else if (kind === 'cc_silent') {
+    body.timeout_seconds = parseInt($('rf-cc-timeout').value, 10) || 30;
+  } else if (kind === 'quality_spike') {
+    body.window_seconds = parseInt($('rf-qs-window').value, 10) || 60;
+    body.rate_threshold = parseFloat($('rf-qs-rate').value) || 0.05;
+  }
+  const r = await fetch('/api/alerts/rules', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify(body),
+  });
+  if (!r.ok) {
+    const err = await r.text();
+    $('r-error').textContent = `Error: ${err}`;
+    return;
+  }
+  $('r-name').value = '';
+  loadRules();
+});
+
+let _firingsList = [];
+function renderFirings() {
+  $('m-firings').textContent = _firingsList.length;
+  const el = $('firings');
+  if (!_firingsList.length) {
+    el.innerHTML = '<div class="empty">No firings yet.</div>';
+    return;
+  }
+  el.innerHTML = _firingsList.slice(0, 50).map(f => `
+    <div class="firing ${escHTML(f.kind)}">
+      <div class="f-name">${escHTML(f.rule_name || f.kind)}
+        <span class="kind-pill ${f.kind}" style="font-size:9px">${f.kind}</span></div>
+      <div class="f-msg">${escHTML(f.message)}</div>
+      <div class="f-time">${escHTML(fmtTs(f.fired_at))}</div>
+    </div>`).join('');
+}
+
+async function loadRecent() {
+  const r = await fetch('/api/alerts/recent?limit=100');
+  if (!r.ok) return;
+  const data = await r.json();
+  _firingsList = data.firings || [];
+  renderFirings();
+}
+
+function connectWs() {
+  const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+  const ws = new WebSocket(`${proto}://${location.host}/ws/alerts`);
+  ws.onmessage = e => {
+    try {
+      const f = JSON.parse(e.data);
+      // De-dupe by (rule_id, fired_at).
+      const key = f.rule_id + '@' + f.fired_at;
+      if (!_firingsList.some(x => x.rule_id + '@' + x.fired_at === key)) {
+        _firingsList.unshift(f);
+        if (_firingsList.length > 200) _firingsList.length = 200;
+        renderFirings();
+      }
+    } catch (_) {}
+  };
+  ws.onclose = ws.onerror = () => setTimeout(connectWs, 2000);
+}
+
+fetch('/api/version').then(r => r.json()).then(v => {
+  if (v && v.version) $('m-version').textContent = `v${v.version}`;
+}).catch(() => {});
+
+loadRules();
+loadRecent();
+connectWs();
+</script>
+</body>
+</html>

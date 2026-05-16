@@ -144,6 +144,7 @@ async def _periodic_snapshot(
     interval: float,
     stop_event: asyncio.Event,
     serve: bool,
+    evaluator=None,
 ) -> None:
     from . import server as srv  # lazy import — only needed when --serve is active
     while not stop_event.is_set():
@@ -152,7 +153,15 @@ async def _periodic_snapshot(
             break
         except asyncio.TimeoutError:
             pass
-        state.tick(datetime.now())
+        now = datetime.now()
+        state.tick(now)
+        # Time-based alerts (cc_silent, quality_spike) live on this same
+        # cadence — keeps us from spinning up yet another background task.
+        if evaluator is not None:
+            try:
+                evaluator.tick(now)
+            except Exception as e:  # noqa: BLE001
+                print(f"# alerts: tick failed: {e}", file=sys.stderr)
         try:
             # Atomic write — power-yank mid-write must not leave a
             # truncated snapshot. ``atomic_write_text`` also preserves
@@ -232,6 +241,9 @@ def _parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
                    help="delete per-call WAVs in --calls-dir older than this "
                         "many hours; checked once an hour (default: %(default)s, "
                         "0 disables)")
+    p.add_argument("--alerts-rules", default="alerts.json",
+                   help="path to the Alerts Engine rules file "
+                        "(default: %(default)s, empty string disables)")
     return p.parse_args(argv)
 
 
@@ -277,20 +289,44 @@ async def _run(args: argparse.Namespace) -> None:
     if primed:
         print(f"# primed event buffer with {primed} events from JSONL", file=sys.stderr)
 
+    # ── Alerts Engine ────────────────────────────────────────────────
+    evaluator = None
+    if args.alerts_rules:
+        from .alerts import Evaluator
+        evaluator = Evaluator(
+            rules_path=Path(args.alerts_rules),
+            event_log=event_log,
+        )
+        if evaluator.list_rules():
+            print(
+                f"# alerts: loaded {len(evaluator.list_rules())} rule(s) "
+                f"from {args.alerts_rules}",
+                file=sys.stderr,
+            )
+
     printer = _make_event_printer(state, args.verbose)
-    if args.serve:
-        # Wrap so the FastAPI ``/api/health`` endpoint can answer
-        # "when was the last voice frame", not just "when was any event".
-        from . import server as srv
-
+    if args.serve or evaluator is not None:
+        # Wrap the printer so we can:
+        #   * mark the last voice event (for /api/health)
+        #   * feed each event through the Alerts evaluator
+        # without making LineRunner aware of either dependency.
         _printer = printer
+        srv = None
+        if args.serve:
+            from . import server as _srv
+            srv = _srv
 
-        def printer_with_voice_marker(ev: Event) -> None:
-            if ev.type == EventType.VOICE_CALL:
+        def printer_chain(ev: Event) -> None:
+            if srv is not None and ev.type == EventType.VOICE_CALL:
                 srv.note_voice_event(ev.timestamp)
+            if evaluator is not None:
+                try:
+                    evaluator.on_event(ev)
+                except Exception as exc:  # noqa: BLE001 — alerts must never break pipeline
+                    print(f"# alerts: on_event failed: {exc}", file=sys.stderr)
             _printer(ev)
 
-        printer = printer_with_voice_marker
+        printer = printer_chain
     runner = LineRunner(state, on_event=printer, event_log=event_log)
 
     loop = asyncio.get_running_loop()
@@ -306,6 +342,7 @@ async def _run(args: argparse.Namespace) -> None:
             srv.attach_recordings(recordings)
         srv.attach_event_log(event_log)
         srv.attach_snapshot_path(snapshot_path)
+        srv.attach_evaluator(evaluator)
         config = uvicorn.Config(
             srv.app,
             host="0.0.0.0",
@@ -319,7 +356,10 @@ async def _run(args: argparse.Namespace) -> None:
         print(f"# dashboard → http://0.0.0.0:{args.port}/", file=sys.stderr)
 
     snap_task = asyncio.create_task(
-        _periodic_snapshot(state, snapshot_path, args.snapshot_interval, stop_event, args.serve)
+        _periodic_snapshot(
+            state, snapshot_path, args.snapshot_interval, stop_event,
+            args.serve, evaluator=evaluator,
+        )
     )
     retention_task: Optional[asyncio.Task] = None
     if recordings is not None and args.wav_retention_hours > 0:

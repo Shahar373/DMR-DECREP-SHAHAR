@@ -15,10 +15,11 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
-from fastapi import FastAPI, Query, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, HTMLResponse, Response, StreamingResponse
 
 from . import __build_date__, __version__
+from .alerts import Evaluator, rule_from_dict
 from .event_log import (
     CSV_COLUMNS,
     EventLog,
@@ -80,6 +81,15 @@ def attach_snapshot_path(path: Optional[Path]) -> None:
     the file's size and whether it's actually being written."""
     global _snapshot_path
     _snapshot_path = path
+
+
+_evaluator: Optional[Evaluator] = None
+
+
+def attach_evaluator(ev: Optional[Evaluator]) -> None:
+    """Wire the Alerts Engine into the HTTP/WS routes."""
+    global _evaluator
+    _evaluator = ev
 
 
 async def push_snapshot() -> None:
@@ -395,6 +405,85 @@ async def get_recording(filename: str):
     if not p.exists() or not p.is_file():
         return Response(status_code=404)
     return FileResponse(p, media_type="audio/wav")
+
+
+@app.get("/api/alerts/rules")
+async def list_alert_rules():
+    if _evaluator is None:
+        return {"rules": []}
+    return {"rules": [r.model_dump(mode="json") for r in _evaluator.list_rules()]}
+
+
+@app.post("/api/alerts/rules")
+async def create_alert_rule(payload: dict):
+    if _evaluator is None:
+        raise HTTPException(status_code=503, detail="alerts engine not attached")
+    # Drop client-supplied ids so the server always assigns one.
+    payload = dict(payload)
+    payload.pop("id", None)
+    try:
+        rule = rule_from_dict(payload)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=400, detail=f"invalid rule: {exc}") from exc
+    _evaluator.add_rule(rule)
+    return rule.model_dump(mode="json")
+
+
+@app.delete("/api/alerts/rules/{rule_id}")
+async def delete_alert_rule(rule_id: str):
+    if _evaluator is None:
+        raise HTTPException(status_code=503, detail="alerts engine not attached")
+    if not _evaluator.remove_rule(rule_id):
+        raise HTTPException(status_code=404, detail="rule not found")
+    return Response(status_code=204)
+
+
+@app.post("/api/alerts/rules/{rule_id}/toggle")
+async def toggle_alert_rule(rule_id: str, payload: dict):
+    if _evaluator is None:
+        raise HTTPException(status_code=503, detail="alerts engine not attached")
+    enabled = bool(payload.get("enabled", True))
+    if not _evaluator.set_enabled(rule_id, enabled):
+        raise HTTPException(status_code=404, detail="rule not found")
+    return {"id": rule_id, "enabled": enabled}
+
+
+@app.get("/api/alerts/recent")
+async def recent_alerts(limit: int = Query(100, ge=1, le=500)):
+    if _evaluator is None:
+        return {"firings": []}
+    return {"firings": [f.model_dump(mode="json")
+                        for f in _evaluator.recent_firings(limit=limit)]}
+
+
+@app.websocket("/ws/alerts")
+async def ws_alerts(websocket: WebSocket):
+    """Push channel for AlertFiring JSON. The dashboard's toast bar
+    subscribes here and shows each incoming message as a notification."""
+    await websocket.accept()
+    if _evaluator is None:
+        await websocket.close(code=1011)
+        return
+    q = _evaluator.subscribe()
+    try:
+        # Replay the last few firings so a freshly-loaded UI doesn't show
+        # an empty bar when interesting things just happened.
+        for past in _evaluator.recent_firings(limit=5)[::-1]:
+            await websocket.send_text(past.model_dump_json())
+        while True:
+            data = await q.get()
+            await websocket.send_text(data)
+    except WebSocketDisconnect:
+        pass
+    except Exception as exc:  # noqa: BLE001
+        print(f"# ws/alerts: client error: {exc}", file=sys.stderr)
+    finally:
+        _evaluator.unsubscribe(q)
+
+
+@app.get("/alerts")
+async def alerts_page():
+    return HTMLResponse((FRONTEND_DIR / "alerts.html").read_text(encoding="utf-8"))
 
 
 @app.websocket("/ws")

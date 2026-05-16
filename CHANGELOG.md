@@ -9,6 +9,50 @@ Versioning follows [Semantic Versioning](https://semver.org/):
 Source of truth: `backend/__init__.py` (`__version__`). The dashboard
 footer shows the running build's version and `/api/version` exposes it.
 
+## [0.13.0] — 2026-05-16
+
+### Added — Alerts Engine
+- **`backend/alerts.py`** — rule-based notifications driven by the live
+  event stream. Four rule kinds (discriminated union, pydantic):
+  * `radio_keyup` — fires when a watched radio id starts a new voice
+    call (per-call, not per-frame; tracks slot/src/tgt to suppress
+    duplicates).
+  * `encryption` — fires on any `EncryptionEvent`, optionally filtered
+    by talkgroup. Joins against the per-slot active call so the
+    notification can carry SRC + TG.
+  * `cc_silent` — fires once when no `SiteInfoEvent` /
+    `ChannelStatusEvent` / `LSNStatusEvent` has been seen for the
+    configured number of seconds; re-arms when CC traffic resumes.
+  * `quality_spike` — fires when the overall CRC error rate over a
+    rolling window crosses a threshold (reuses
+    `compute_quality_ratios`).
+  Every rule has a `cooldown_seconds` to prevent flooding.
+- **`Evaluator`** — threadsafe holder for the active rule set. Hooks:
+  `on_event(ev)` for stream-driven rules, `tick(now)` for time-based
+  rules. Both wired from `cli.py` (the printer chain feeds events; the
+  periodic snapshot loop calls `tick`).
+- **Rule persistence**: rules round-trip through `alerts.json` via the
+  atomic write helper. A corrupt file is renamed aside (`.bad`) so a
+  hand-edit typo can't take the service down. New
+  `--alerts-rules PATH` CLI flag (empty string disables).
+- **REST API**:
+  * `GET    /api/alerts/rules`              — list rules
+  * `POST   /api/alerts/rules`              — add rule (validates kind)
+  * `DELETE /api/alerts/rules/{id}`         — remove rule
+  * `POST   /api/alerts/rules/{id}/toggle`  — enable / disable
+  * `GET    /api/alerts/recent?limit=N`     — last N firings (in-memory)
+- **`WS /ws/alerts`** — push channel for `AlertFiring` JSON. Sends the
+  last 5 firings on connect so a freshly-loaded UI shows context.
+- **Toast bar** on the Live dashboard — auto-subscribes to
+  `/ws/alerts`, renders each firing as a colored toast (top-right,
+  auto-dismiss after 12 s, color by rule kind). Requests browser
+  Notification permission once so alerts surface even when the tab is
+  backgrounded.
+- **`/alerts` page** for rule management — kind-specific form
+  (radio IDs / TG IDs / silent timeout / window+rate), enabled toggle,
+  delete, live recent-firings panel.
+- `Alerts` link added to the nav on every page.
+
 ## [0.12.0] — 2026-05-16
 
 ### Added — Foundation block ("walk-away-safe on a Pi")
