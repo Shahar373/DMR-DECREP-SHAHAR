@@ -9,6 +9,30 @@ Versioning follows [Semantic Versioning](https://semver.org/):
 Source of truth: `backend/__init__.py` (`__version__`). The dashboard
 footer shows the running build's version and `/api/version` exposes it.
 
+## [0.11.1] — 2026-05-16
+
+### Fixed
+- **Dossier for target-only radios**: a radio that appeared only as the
+  TGT of private events (data headers / LRRP requests addressed to it)
+  passed the existence check but came back with `first_seen=None`,
+  `last_seen=None` and an empty hourly histogram, because the lifetime
+  pass only queried `src=radio_id`. The hourly histogram and lifetime
+  bounds now union the src-side and tgt-side rows (de-duped).
+- **Dossier recordings scan**: `_attach_recording` was calling
+  `recordings.list_recent()` once per call session (up to 20×),
+  rescanning the WAV directory and parsing every header each time.
+  Snapshot the list once and re-use across sessions.
+- **Per-call audio src in the Dossier panel** now `encodeURIComponent`s
+  the WAV filename, matching the live-history button — filenames with
+  spaces / `+` / `&` no longer break the `<audio>` URL.
+- **Subprocess shutdown**: the SIGTERM-on-stop watcher task in
+  `stream_subprocess` is now awaited after cancellation so asyncio
+  doesn't emit "Task was destroyed but it is pending".
+
+### Added
+- `CLAUDE.md` with the project's per-change rules: every commit bumps
+  `__version__` / `__build_date__` and prepends a `CHANGELOG.md` entry.
+
 ## [0.11.0] — 2026-05-16
 
 ### Added
