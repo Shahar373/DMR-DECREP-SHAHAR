@@ -9,6 +9,35 @@ Versioning follows [Semantic Versioning](https://semver.org/):
 Source of truth: `backend/__init__.py` (`__version__`). The dashboard
 footer shows the running build's version and `/api/version` exposes it.
 
+## [0.9.0] — 2026-05-16
+
+### Added
+- **SQLite sidecar index** over the events JSONL. Every `EventLog.append()`
+  now dual-writes the event to both the JSONL (canonical, append-only) and
+  a parallel SQLite database with indexes on `(ts, src, tgt, type)`.
+  `/api/history`, `/api/history.csv`, and `/api/quality` automatically use
+  the index when present and fall back to scanning the JSONL otherwise —
+  no API shape changes.
+- `schema_version` field on every event (`EVENT_SCHEMA_VERSION = 1`). Bumped
+  only on backwards-incompatible changes; the index records the value at
+  build time and surfaces `index_outdated` if a newer-versioned event lands
+  in an older index.
+- `--event-db PATH` CLI flag (defaults to `--event-log` with `.db` suffix).
+- `--no-event-db` CLI flag to disable indexing entirely (JSONL-only mode).
+- `--rebuild-index` CLI mode — drops and replays the JSONL into a fresh
+  SQLite database, prints row count, and exits.
+- Startup banner reports the event index row count and database path.
+
+### Design notes
+- JSONL remains the **source of truth**. SQLite is rebuildable from it.
+- Writes are batched (every 100 inserts or 2 s, whichever first) — worst-case
+  data loss on power yank is ~2 s of *index* rows, recoverable by
+  `--rebuild-index`.
+- Opened in WAL mode with `synchronous=NORMAL` and `check_same_thread=False`
+  + internal lock, so the parser thread and FastAPI workers can share it.
+- SQLite append failures are logged once per session and swallowed — the
+  index must never break the live monitor.
+
 ## [0.8.0] — 2026-05-15
 
 ### Added

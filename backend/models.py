@@ -40,9 +40,18 @@ class LSNState(BaseModel):
     tg: Optional[int] = None
 
 
+# Bumped only when an existing event field's type or semantics change in a
+# backwards-incompatible way. Additive fields (new optional columns, new event
+# subclasses) do NOT bump this — readers tolerate unknown keys. The current
+# value is recorded into the SQLite sidecar at build time and surfaced as
+# ``index_outdated`` if a newer-versioned event ever lands in an older index.
+EVENT_SCHEMA_VERSION = 1
+
+
 class _BaseEvent(BaseModel):
     timestamp: datetime = Field(default_factory=lambda: datetime.now())
     raw_line: str
+    schema_version: int = Field(default=EVENT_SCHEMA_VERSION)
 
 
 # --- Phase 1A: control channel ---

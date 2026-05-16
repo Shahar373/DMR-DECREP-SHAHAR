@@ -19,7 +19,9 @@ from fastapi.responses import FileResponse, HTMLResponse, Response, StreamingRes
 
 from . import __build_date__, __version__
 from .event_log import (
+    CSV_COLUMNS,
     EventLog,
+    _row_from_dict,
     iter_history_csv,
     parse_since,
     quality_ratios_over_window,
@@ -147,17 +149,32 @@ async def event_stats():
     return _event_log.stats()
 
 
+def _prefer_index():
+    """Return the SQLite EventIndex if it's attached and non-empty.
+
+    Endpoints use this to switch transparently from JSONL-scan to indexed
+    SELECTs without changing their response shape.
+    """
+    if _event_log is None or _event_log.index is None:
+        return None
+    try:
+        if _event_log.index.count() > 0:
+            return _event_log.index
+    except Exception:  # noqa: BLE001
+        return None
+    return None
+
+
 @app.get("/api/quality")
 async def quality_window(window: int = Query(3600, ge=60, le=7 * 86400)):
-    """Quality ratios computed over a fixed rolling window from the JSONL.
+    """Quality ratios computed over a fixed rolling window.
 
     ``window`` is in seconds (60s – 7d). Default 1h matches what most
-    operators want to see — "is the link healthy *right now*". Unlike
-    /api/stats this scans the on-disk JSONL so it doesn't drift with
-    the in-memory buffer size.
+    operators want to see — "is the link healthy *right now*". Prefers the
+    SQLite index when available; falls back to scanning the JSONL.
     """
     path = _event_log.jsonl_path if _event_log is not None else None
-    return quality_ratios_over_window(path, window_seconds=window)
+    return quality_ratios_over_window(path, window_seconds=window, index=_prefer_index())
 
 
 def _history_filters(since, until, src, tgt, types):
@@ -191,6 +208,11 @@ async def history(
     if path is None:
         return {"events": [], "limit": limit, "offset": offset, "truncated": False}
     filters = _history_filters(since, until, src, tgt, types)
+    idx = _prefer_index()
+    if idx is not None:
+        out = idx.query(limit=limit + 1, offset=offset, **filters)
+        truncated = len(out) > limit
+        return {"events": out[:limit], "limit": limit, "offset": offset, "truncated": truncated}
     out: list[dict] = []
     skipped = 0
     truncated = False
@@ -217,7 +239,25 @@ async def history_csv(
     if path is None:
         return Response("", media_type="text/csv")
     filters = _history_filters(since, until, src, tgt, types)
-    iterator = iter_history_csv(path, **filters)
+    idx = _prefer_index()
+    if idx is not None:
+        import csv as _csv
+        import io as _io
+
+        def _iter_csv_from_index():
+            buf = _io.StringIO()
+            writer = _csv.DictWriter(buf, fieldnames=CSV_COLUMNS, extrasaction="ignore")
+            writer.writeheader()
+            yield buf.getvalue()
+            buf.seek(0); buf.truncate()
+            for obj in idx.iter_query(**filters):
+                writer.writerow(_row_from_dict(obj))
+                yield buf.getvalue()
+                buf.seek(0); buf.truncate()
+
+        iterator = _iter_csv_from_index()
+    else:
+        iterator = iter_history_csv(path, **filters)
     fname = f"dmr_history_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
     return StreamingResponse(
         iterator,

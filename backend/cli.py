@@ -160,6 +160,8 @@ def _parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     mode = p.add_mutually_exclusive_group(required=True)
     mode.add_argument("--live", action="store_true", help="spawn dsd-fme and stream live")
     mode.add_argument("--replay", metavar="FILE", help="replay a captured dsd-fme stderr log")
+    mode.add_argument("--rebuild-index", action="store_true",
+                      help="rebuild the SQLite event index from --event-log and exit")
 
     p.add_argument("--input", default="pulse:dmr_capture.monitor",
                    help="dsd-fme -i input device (live mode, default: %(default)s)")
@@ -186,6 +188,10 @@ def _parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
                    help="append-only JSONL of every parsed event (default: %(default)s)")
     p.add_argument("--event-buffer", type=int, default=20000,
                    help="in-memory event ring buffer size (default: %(default)s)")
+    p.add_argument("--event-db", default=None,
+                   help="SQLite index path (default: --event-log with .db suffix)")
+    p.add_argument("--no-event-db", action="store_true",
+                   help="disable the SQLite index sidecar (JSONL-only)")
     return p.parse_args(argv)
 
 
@@ -202,10 +208,23 @@ async def _run(args: argparse.Namespace) -> None:
         recordings = RecordingRegistry(calls_dir)
 
     from .event_log import EventLog
+    jsonl_path = Path(args.event_log) if args.event_log else None
+    db_path = Path(args.event_db) if args.event_db else None
     event_log = EventLog(
-        jsonl_path=Path(args.event_log) if args.event_log else None,
+        jsonl_path=jsonl_path,
         capacity=args.event_buffer,
+        db_path=db_path,
+        enable_index=not args.no_event_db,
     )
+    if event_log.index is not None:
+        try:
+            rows = event_log.index.count()
+            print(
+                f"# event index: {rows} rows at {event_log.index.db_path}",
+                file=sys.stderr,
+            )
+        except Exception:  # noqa: BLE001
+            pass
 
     state = StateManager()
     snapshot_path = Path(args.snapshot)
@@ -280,8 +299,29 @@ async def _run(args: argparse.Namespace) -> None:
     _print_summary(state)
 
 
+def _rebuild_index(args: argparse.Namespace) -> int:
+    from .event_index import EventIndex
+    from .models import EVENT_SCHEMA_VERSION
+
+    jsonl_path = Path(args.event_log) if args.event_log else None
+    if jsonl_path is None or not jsonl_path.exists():
+        print(f"# --rebuild-index: {jsonl_path} not found", file=sys.stderr)
+        return 1
+    db_path = Path(args.event_db) if args.event_db else jsonl_path.with_suffix(".db")
+    print(f"# rebuilding index at {db_path} from {jsonl_path}", file=sys.stderr)
+    idx = EventIndex(db_path, schema_version=EVENT_SCHEMA_VERSION)
+    try:
+        rows = idx.rebuild_from_jsonl(jsonl_path)
+    finally:
+        idx.close()
+    print(f"# event index: {rows} rows written", file=sys.stderr)
+    return 0
+
+
 def main(argv: Optional[list[str]] = None) -> None:
     args = _parse_args(argv)
+    if getattr(args, "rebuild_index", False):
+        sys.exit(_rebuild_index(args))
     try:
         asyncio.run(_run(args))
     except KeyboardInterrupt:

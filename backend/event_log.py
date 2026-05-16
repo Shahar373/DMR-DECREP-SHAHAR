@@ -18,6 +18,7 @@ from __future__ import annotations
 import csv
 import io
 import json
+import sys
 import threading
 from collections import Counter, deque
 from collections.abc import Iterable, Iterator
@@ -25,7 +26,8 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional
 
-from .models import Event, EventType
+from .event_index import EventIndex
+from .models import EVENT_SCHEMA_VERSION, Event, EventType
 
 
 # Canonical flat schema used for CSV export. Order matters — it becomes the
@@ -199,16 +201,31 @@ class EventLog:
         self,
         jsonl_path: Optional[Path] = None,
         capacity: int = 20_000,
+        db_path: Optional[Path] = None,
+        enable_index: bool = True,
     ) -> None:
         self.jsonl_path = jsonl_path
         self.capacity = capacity
         self._buf: deque[Event] = deque(maxlen=capacity)
         self._lock = threading.Lock()
         self._fh: Optional[io.TextIOBase] = None
+        self._index: Optional[EventIndex] = None
+        self._index_failed_once = False
         if jsonl_path is not None:
             jsonl_path.parent.mkdir(parents=True, exist_ok=True)
             # Line-buffered append; survives crashes line-by-line.
             self._fh = open(jsonl_path, "a", buffering=1, encoding="utf-8")
+            if enable_index:
+                resolved_db = db_path if db_path is not None else jsonl_path.with_suffix(".db")
+                try:
+                    self._index = EventIndex(resolved_db, schema_version=EVENT_SCHEMA_VERSION)
+                except Exception as exc:  # noqa: BLE001
+                    print(
+                        f"# event index: failed to open ({exc}); "
+                        "running with JSONL-only history",
+                        file=sys.stderr,
+                    )
+                    self._index = None
 
     def __len__(self) -> int:
         with self._lock:
@@ -254,6 +271,15 @@ class EventLog:
                     self._fh.close()
                 finally:
                     self._fh = None
+            if self._index is not None:
+                try:
+                    self._index.close()
+                finally:
+                    self._index = None
+
+    @property
+    def index(self) -> Optional[EventIndex]:
+        return self._index
 
     # --- write path ---
 
@@ -265,6 +291,19 @@ class EventLog:
                     self._fh.write(ev.model_dump_json() + "\n")
                 except Exception:  # noqa: BLE001
                     pass  # never let logging take down the pipeline
+            if self._index is not None:
+                try:
+                    self._index.append(ev.model_dump(mode="json"))
+                except Exception as exc:  # noqa: BLE001
+                    # JSONL is the source of truth — an index failure must
+                    # never break the live monitor. Warn once per session.
+                    if not self._index_failed_once:
+                        print(
+                            f"# event index: append failed ({exc}); "
+                            "continuing without index",
+                            file=sys.stderr,
+                        )
+                        self._index_failed_once = True
 
     # --- read path ---
 
@@ -458,6 +497,7 @@ def quality_ratios_over_window(
     jsonl_path: Optional[Path],
     window_seconds: int,
     now: Optional[datetime] = None,
+    index: Optional[EventIndex] = None,
 ) -> dict[str, object]:
     """Compute quality ratios over a fixed time window from the JSONL.
 
@@ -479,7 +519,25 @@ def quality_ratios_over_window(
     latest: Optional[datetime] = None
     sample = 0
 
-    if jsonl_path is not None and jsonl_path.exists():
+    if index is not None and index.count() > 0:
+        by_type_map = index.count_by_type(since=since)
+        for k, v in by_type_map.items():
+            by_type[k] = v
+            sample += v
+        for k, v in index.count_quality_by_kind(since=since).items():
+            quality[k] = v
+        bounds = index.time_bounds(since=since)
+        for raw in bounds:
+            if isinstance(raw, str):
+                try:
+                    ts = datetime.fromisoformat(raw)
+                except ValueError:
+                    continue
+                if earliest is None or ts < earliest:
+                    earliest = ts
+                if latest is None or ts > latest:
+                    latest = ts
+    elif jsonl_path is not None and jsonl_path.exists():
         for obj in stream_history(jsonl_path, since=since):
             sample += 1
             et = obj.get("type")
