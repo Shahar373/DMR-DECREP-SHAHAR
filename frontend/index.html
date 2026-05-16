@@ -260,6 +260,68 @@ tr.has-gps { cursor: pointer; }
   padding: 0 6px; border-left: 1px solid var(--border);
   margin-left: 8px;
 }
+
+/* ── Per-radio Dossier slide-in panel ─────────────────────────────── */
+.dossier-backdrop {
+  position: fixed; inset: 0; background: rgba(0,0,0,0.45);
+  opacity: 0; pointer-events: none; transition: opacity 180ms; z-index: 1499;
+}
+.dossier-backdrop.open { opacity: 1; pointer-events: auto; }
+.dossier-panel {
+  position: fixed; right: 0; top: 0; height: 100vh; width: 440px;
+  transform: translateX(100%); transition: transform 200ms ease-out;
+  background: var(--bg2); border-left: 1px solid var(--border);
+  overflow-y: auto; z-index: 1500; box-shadow: -4px 0 18px rgba(0,0,0,0.4);
+  padding: 14px 16px; font-size: 12px;
+}
+.dossier-panel.open { transform: translateX(0); }
+.dossier-panel .dh {
+  display: flex; align-items: baseline; justify-content: space-between;
+  margin-bottom: 12px; border-bottom: 1px solid var(--border); padding-bottom: 10px;
+}
+.dossier-panel .dh h2 { font-size: 16px; color: var(--blue); }
+.dossier-panel .dh .ip { color: var(--muted); font-size: 11px; }
+.dossier-panel .dclose {
+  background: var(--bg3); color: var(--text); border: 1px solid var(--border);
+  border-radius: 3px; padding: 2px 8px; cursor: pointer; font: inherit;
+}
+.dossier-panel .dclose:hover { color: var(--red); }
+.dossier-panel section { margin-bottom: 14px; }
+.dossier-panel section h3 {
+  font-size: 10px; color: var(--muted); text-transform: uppercase;
+  letter-spacing: .05em; margin-bottom: 6px;
+}
+.dossier-panel .stats-grid {
+  display: grid; grid-template-columns: 1fr 1fr; gap: 6px 10px;
+}
+.dossier-panel .stat .k { color: var(--muted); font-size: 10px; }
+.dossier-panel .stat .v { color: var(--text); font-weight: 700; font-size: 14px; }
+.dossier-panel .chip {
+  display: inline-block; background: var(--bg3); border: 1px solid var(--border);
+  color: var(--text); padding: 2px 8px; border-radius: 10px; margin: 2px 4px 2px 0;
+  cursor: pointer; font-size: 11px;
+}
+.dossier-panel .chip:hover { border-color: var(--blue); color: var(--blue); }
+.dossier-panel .chip.private { border-color: var(--orange, #f0883e); }
+.dossier-panel .row {
+  display: flex; justify-content: space-between; gap: 8px;
+  padding: 3px 0; border-bottom: 1px dashed var(--border);
+}
+.dossier-panel .row:last-child { border-bottom: none; }
+.dossier-panel .muted { color: var(--muted); }
+#d-map { width: 100%; height: 160px; background: var(--bg3); border-radius: 4px; }
+.dossier-panel .hour-bars {
+  display: flex; gap: 1px; align-items: flex-end; height: 50px;
+  background: var(--bg3); padding: 2px; border-radius: 3px;
+}
+.dossier-panel .hour-bars .b {
+  flex: 1; background: var(--blue); min-height: 1px; opacity: 0.85;
+}
+.dossier-panel .hour-bars .b.empty { background: var(--border); }
+.dossier-panel audio { width: 100%; height: 24px; margin-top: 2px; }
+.dossier-panel .recording-row { padding: 6px 0; border-bottom: 1px dashed var(--border); }
+.dossier-panel .recording-row:last-child { border-bottom: none; }
+.dossier-panel .recording-row .meta { display: flex; justify-content: space-between; }
 </style>
 </head>
 <body>
@@ -370,6 +432,21 @@ tr.has-gps { cursor: pointer; }
   <div style="margin-left:auto">Updated: <span id="q-ts">—</span></div>
   <div id="version-tag" title="App version">v—</div>
 </div>
+
+<!-- Per-radio Dossier slide-in panel -->
+<div id="dossier-backdrop" class="dossier-backdrop"></div>
+<aside id="dossier-panel" class="dossier-panel" aria-hidden="true">
+  <div class="dh">
+    <div>
+      <h2 id="d-title">Radio —</h2>
+      <div class="ip">IP: <span id="d-ip">—</span></div>
+    </div>
+    <button class="dclose" onclick="closeDossier()">close</button>
+  </div>
+  <div id="d-body">
+    <section class="muted">Loading…</section>
+  </div>
+</aside>
 
 <script>
 // ── Map setup ─────────────────────────────────────────────────────
@@ -903,6 +980,171 @@ async function refreshDebrief() {
 debriefSel.addEventListener('change', refreshDebrief);
 refreshDebrief();
 setInterval(refreshDebrief, 2000);
+
+// ── Per-radio Dossier slide-in panel ──────────────────────────────
+const dPanel = document.getElementById('dossier-panel');
+const dBackdrop = document.getElementById('dossier-backdrop');
+let _dossierMap = null;
+let _dossierTrack = null;
+
+function closeDossier() {
+  dPanel.classList.remove('open');
+  dBackdrop.classList.remove('open');
+}
+dBackdrop.addEventListener('click', closeDossier);
+
+async function openDossier(id) {
+  if (!id) return;
+  dPanel.classList.add('open');
+  dBackdrop.classList.add('open');
+  document.getElementById('d-title').textContent = `Radio ${id}`;
+  document.getElementById('d-body').innerHTML = '<section class="muted">Loading…</section>';
+  try {
+    const r = await fetch(`/api/radio/${id}?window=86400`);
+    if (r.status === 404) {
+      document.getElementById('d-body').innerHTML =
+        '<section class="muted">No activity for this radio in the last 24h.</section>';
+      return;
+    }
+    if (!r.ok) {
+      document.getElementById('d-body').innerHTML = `<section class="muted">Error ${r.status}</section>`;
+      return;
+    }
+    renderDossier(await r.json());
+  } catch (e) {
+    document.getElementById('d-body').innerHTML = `<section class="muted">Error: ${e.message}</section>`;
+  }
+}
+
+function renderDossier(d) {
+  const fmtTs = s => s ? String(s).split('.')[0].replace('T', ' ') : '—';
+  document.getElementById('d-title').textContent = `Radio ${d.id}`;
+  document.getElementById('d-ip').textContent = d.ip || '—';
+
+  const chips = (d.top_co_talkers || []).map(c => `
+    <span class="chip ${c.kind === 'private' ? 'private' : ''}"
+          onclick="openDossier(${c.id})"
+          title="${c.kind} · weight ${c.weight}${c.shared_tgs.length ? ' · TGs ' + c.shared_tgs.join(',') : ''}">
+      ${c.id} <span style="color:var(--muted);font-size:10px">×${c.weight}</span>
+    </span>`).join('') || '<span class="muted">— none in window —</span>';
+
+  const tgs = (d.tgs_touched || []).slice(0, 8).map(t =>
+    `<div class="row"><span>TG ${t.tg}</span><span>${t.count}</span></div>`
+  ).join('') || '<div class="muted">No TG activity.</div>';
+
+  const calls = (d.recent_calls || []).map(c => {
+    const rec = c.recording
+      ? `<audio controls preload="none" src="/recordings/${c.recording.filename}"></audio>`
+      : '<span class="muted" style="font-size:10px">no recording</span>';
+    return `<div class="recording-row">
+      <div class="meta"><span>${fmtTs(c.ts)} · slot ${c.slot} → TG ${c.tgt}</span>
+                       <span class="muted">${c.duration_s}s</span></div>
+      ${rec}
+    </div>`;
+  }).join('') || '<div class="muted">No recent calls.</div>';
+
+  const maxBar = Math.max(1, ...(d.hourly_activity || []));
+  const bars = (d.hourly_activity || []).map(n => {
+    const pct = Math.round(100 * n / maxBar);
+    const cls = n === 0 ? 'empty' : '';
+    return `<div class="b ${cls}" style="height:${pct}%" title="${n}"></div>`;
+  }).join('');
+
+  document.getElementById('d-body').innerHTML = `
+    <section>
+      <div class="stats-grid">
+        <div class="stat"><div class="k">first seen</div><div class="v">${fmtTs(d.first_seen)}</div></div>
+        <div class="stat"><div class="k">last seen</div><div class="v">${fmtTs(d.last_seen)}</div></div>
+        <div class="stat"><div class="k">total calls</div><div class="v">${d.total_calls}</div></div>
+        <div class="stat"><div class="k">enc events on used slots</div><div class="v">${d.encrypted_calls}</div></div>
+      </div>
+    </section>
+    <section>
+      <h3>Top Co-talkers</h3>
+      <div>${chips}</div>
+    </section>
+    <section>
+      <h3>Talkgroups Touched</h3>
+      ${tgs}
+    </section>
+    <section>
+      <h3>Hourly Activity (last 24h)</h3>
+      <div class="hour-bars">${bars}</div>
+    </section>
+    <section>
+      <h3>Position Track</h3>
+      <div id="d-map"></div>
+    </section>
+    <section>
+      <h3>Recent Calls</h3>
+      ${calls}
+    </section>
+  `;
+
+  // Position track on Leaflet — lazy init.
+  const positions = (d.position_history || []).map(p => [p.lat, p.lon]);
+  setTimeout(() => {
+    const el = document.getElementById('d-map');
+    if (!el) return;
+    if (_dossierMap) { _dossierMap.remove(); _dossierMap = null; }
+    if (positions.length === 0) {
+      el.innerHTML = '<div class="muted" style="padding:8px">No GPS positions in window.</div>';
+      return;
+    }
+    _dossierMap = L.map(el, { zoomControl: false, attributionControl: false })
+      .setView(positions[positions.length - 1], 13);
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',
+      { maxZoom: 18 }).addTo(_dossierMap);
+    _dossierTrack = L.polyline(positions, { color: '#58a6ff', weight: 3 }).addTo(_dossierMap);
+    if (positions.length > 1) {
+      L.circleMarker(positions[0],
+        { radius: 4, color: '#3fb950', fillColor: '#3fb950', fillOpacity: 1 }).addTo(_dossierMap)
+        .bindTooltip('start');
+      L.circleMarker(positions[positions.length - 1],
+        { radius: 5, color: '#f85149', fillColor: '#f85149', fillOpacity: 1 }).addTo(_dossierMap)
+        .bindTooltip('latest');
+      _dossierMap.fitBounds(_dossierTrack.getBounds(), { padding: [20, 20] });
+    }
+  }, 50);
+}
+
+// Hook a Dossier button into each radio row by post-processing renderRadios.
+// We attach via row right-click handler too, but the explicit button is the
+// canonical affordance.
+const _origRenderRadios = renderRadios;
+renderRadios = function(snap) {
+  _origRenderRadios(snap);
+  // Add a Dossier button to each row's first cell (idempotent).
+  document.querySelectorAll('#radio-tbody tr').forEach((tr, i) => {
+    const firstCell = tr.querySelector('td');
+    if (!firstCell || firstCell.querySelector('.d-btn')) return;
+    const idText = firstCell.querySelector('strong')?.textContent;
+    if (!idText) return;
+    const btn = document.createElement('button');
+    btn.className = 'd-btn';
+    btn.textContent = 'D';
+    btn.title = 'Open Dossier';
+    btn.style.cssText =
+      'margin-left:6px;padding:0 5px;font:inherit;font-size:10px;' +
+      'background:var(--bg3);color:var(--blue);' +
+      'border:1px solid var(--border);border-radius:3px;cursor:pointer;';
+    btn.onclick = e => { e.stopPropagation(); openDossier(parseInt(idText)); };
+    firstCell.appendChild(btn);
+  });
+};
+
+// Deep-link: /?dossier=68 auto-opens after first snapshot.
+{
+  const qp = new URLSearchParams(window.location.search);
+  const want = qp.get('dossier');
+  if (want) {
+    const tick = () => {
+      if (lastSnap) openDossier(parseInt(want));
+      else setTimeout(tick, 200);
+    };
+    tick();
+  }
+}
 </script>
 </body>
 </html>

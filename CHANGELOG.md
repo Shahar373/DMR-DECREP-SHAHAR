@@ -9,6 +9,31 @@ Versioning follows [Semantic Versioning](https://semver.org/):
 Source of truth: `backend/__init__.py` (`__version__`). The dashboard
 footer shows the running build's version and `/api/version` exposes it.
 
+## [0.11.0] — 2026-05-16
+
+### Added
+- **Per-radio Dossier** as a slide-in side panel on the dashboard. Click
+  the `D` button on any radio row (or visit `/?dossier=<id>`) to slide in
+  a 440px panel from the right with:
+  * lifetime stats (first/last seen, total calls, encryption events on
+    used slots)
+  * Top Co-talkers chips (clicking a chip re-renders the panel for that
+    radio in place)
+  * Talkgroups touched, with counts
+  * 24-bar hourly activity histogram
+  * Position track on Leaflet (start/latest markers + polyline)
+  * Recent calls (up to 20) with `<audio>` players when a WAV is matched
+    in `RecordingRegistry` (matched by src/tgt and ±5 s of start)
+- `GET /api/radio/{radio_id}?window=SECONDS` — returns the dossier JSON
+  or 404 if the radio is unknown in the window.
+- `backend/dossier.py` with `build_dossier(index, radio_id, window, …)` —
+  collapses voice_call frames into call sessions (PTT gap > 2 s starts a
+  new session) and reuses `compute_talker_pairs()` for co-talker math.
+- SRC cells on the Debrief table are now click-through links that
+  `/?dossier=<src>` deep-link into the panel.
+- Cytoscape nodes on `/network` deep-link to `/?dossier=<id>` (the
+  forward-declaration from v0.10.0 is now live).
+
 ## [0.10.0] — 2026-05-16
 
 ### Added

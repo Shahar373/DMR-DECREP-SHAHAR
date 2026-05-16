@@ -266,6 +266,32 @@ async def history_csv(
     )
 
 
+@app.get("/api/radio/{radio_id}")
+async def radio_dossier(
+    radio_id: int,
+    window: int = Query(24 * 3600, ge=60, le=30 * 86400),
+):
+    """Per-radio Dossier — lifetime stats, co-talkers, calls, positions.
+
+    Returns 404 if the radio has not appeared in the window.
+    """
+    from .dossier import build_dossier
+
+    idx = _prefer_index()
+    if idx is None:
+        return Response(status_code=404)
+    radio_state = None
+    if _state is not None:
+        radio_state = _state.radios.get(radio_id) if hasattr(_state, "radios") else None
+    result = build_dossier(
+        idx, radio_id, window_seconds=window,
+        recordings=_recordings, radio_state=radio_state,
+    )
+    if result is None:
+        return Response(status_code=404)
+    return result
+
+
 @app.get("/api/network")
 async def network_graph(
     window: int = Query(3600, ge=60, le=7 * 86400),

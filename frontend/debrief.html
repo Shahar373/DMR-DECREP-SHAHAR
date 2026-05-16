@@ -294,7 +294,10 @@ function render(events) {
       <tr>
         <td class="t-time">${fmtTime(ev.timestamp)}</td>
         <td><span class="t-type ${ev.type}">${ev.type}</span></td>
-        <td>${src ?? '<span class="muted">—</span>'}</td>
+        <td>${src != null
+          ? `<a href="/?dossier=${src}" title="Open Dossier"
+                style="color:var(--blue);text-decoration:none">${src}</a>`
+          : '<span class="muted">—</span>'}</td>
         <td>${tgt ?? '<span class="muted">—</span>'}</td>
         <td>${slot ?? '<span class="muted">—</span>'}</td>
         <td>${describe(ev)}</td>
