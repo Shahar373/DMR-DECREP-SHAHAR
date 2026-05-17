@@ -9,6 +9,30 @@ Versioning follows [Semantic Versioning](https://semver.org/):
 Source of truth: `backend/__init__.py` (`__version__`). The dashboard
 footer shows the running build's version and `/api/version` exposes it.
 
+## [0.14.2] — 2026-05-17
+
+### Fixed — dashboard freezing on big windows (production crash)
+- **`/api/network` and `/api/radio/{id}` no longer block the event
+  loop.** Both endpoints called fully-synchronous aggregations
+  (`compute_talker_pairs`, `build_dossier`) directly from `async def`
+  handlers. On a busy 24 h window this could take many seconds; while
+  the work ran, every other coroutine — including the live
+  snapshot-broadcast WebSocket — was starved. The dashboard appeared to
+  "freeze" and on at least one Pi the systemd watchdog/health check
+  killed the process and re-spawned it (`restart counter at 2`).
+  The two heavy calls are now off-loaded with
+  `asyncio.to_thread(...)`, so the event loop stays responsive and the
+  live feed keeps streaming even while the heavy query is running.
+- **Row materialisation hard cap.** Both `network.py` and
+  `dossier.py` previously asked the SQLite index for `limit=10_000_000`
+  rows when accumulating the window — an effective "no limit". On a
+  4 GB Pi with a 2.3 GB events DB this had room to OOM if traffic ever
+  spiked. Capped at `500_000` rows per query (≈120 MB of payload at
+  current row size) and documented the cap with a comment in
+  `network.py`. The cap is well above the steady-state workload, so
+  it's invisible in normal use but stops a runaway window from
+  exhausting the Pi.
+
 ## [0.14.1] — 2026-05-17
 
 ### Fixed — self-review polish on the v0.14.0 a11y pack

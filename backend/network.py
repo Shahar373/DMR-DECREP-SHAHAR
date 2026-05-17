@@ -26,6 +26,13 @@ _PAIR_TYPES = ("voice_call", "preamble_csbk", "data_header", "lrrp_request")
 _PRIVATE_ADDRESSING = {"Individual", "Indiv"}
 _GROUP_ADDRESSING = {"Group"}
 
+# Safety cap on rows materialised into Python — protects a low-RAM Pi
+# from runaway windows. 500k rows × ~250 B/row of payload JSON ≈ 120 MB,
+# which fits even on a 1 GB Pi. A busy 24 h window at this site sees
+# tens of thousands of pair-ish events, so this cap is never hit in
+# practice — it just prevents an OOM if the rate ever spikes 10×.
+_ROW_HARD_CAP = 500_000
+
 
 def _classify(row_type: str, addressing: Optional[str]) -> Optional[str]:
     """Return 'group', 'private', or None for an event row."""
@@ -60,7 +67,7 @@ def compute_talker_pairs(
 
     # Pull every pair-ish row once. payload carries the addressing field we
     # need to classify group vs private without a second query.
-    rows = index.query(since=since, types=list(_PAIR_TYPES), limit=10_000_000)
+    rows = index.query(since=since, types=list(_PAIR_TYPES), limit=_ROW_HARD_CAP)
 
     # Per-radio aggregates (for node attributes).
     radio_total_calls: Counter[int] = Counter()
@@ -127,7 +134,7 @@ def compute_talker_pairs(
     # has_gps: did this radio emit any lrrp_position in window?
     gps_radios = {
         row.get("src")
-        for row in index.query(since=since, types=["lrrp_position"], limit=10_000_000)
+        for row in index.query(since=since, types=["lrrp_position"], limit=_ROW_HARD_CAP)
         if row.get("src") is not None
     }
 

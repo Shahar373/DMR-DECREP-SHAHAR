@@ -115,12 +115,12 @@ def build_dossier(
         if ip_rows:
             ip = ip_rows[0].get("ip")
 
-    rows_as_src = index.query(src=radio_id, since=since, limit=10_000_000)
+    rows_as_src = index.query(src=radio_id, since=since, limit=500_000)
     # Also include events where this radio is the *target* (e.g. private data
     # headers or LRRP requests addressed to it) — otherwise a radio that only
     # appears as a recipient passes the existence check above but ends up with
     # first_seen=None/last_seen=None/empty hourly.
-    rows_as_tgt = index.query(tgt=radio_id, since=since, limit=10_000_000)
+    rows_as_tgt = index.query(tgt=radio_id, since=since, limit=500_000)
 
     voice_rows = [r for r in rows_as_src if r.get("type") == "voice_call"]
     voice_rows.sort(key=lambda r: r.get("timestamp", ""))
@@ -207,7 +207,7 @@ def build_dossier(
     used_slots = {s["slot"] for s in sessions if s.get("slot") is not None}
     encrypted_calls = 0
     if used_slots:
-        for r in index.query(since=since, types=["encryption"], limit=10_000_000):
+        for r in index.query(since=since, types=["encryption"], limit=500_000):
             if r.get("slot") in used_slots:
                 encrypted_calls += 1
 

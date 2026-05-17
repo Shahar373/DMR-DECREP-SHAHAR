@@ -350,7 +350,11 @@ async def radio_dossier(
     radio_state = None
     if _state is not None:
         radio_state = _state.radios.get(radio_id) if hasattr(_state, "radios") else None
-    result = build_dossier(
+    # Off-loop: build_dossier can pull tens of thousands of rows on a busy
+    # 24h window. Running it synchronously inside the async handler would
+    # block the event loop and freeze the live WebSocket feed.
+    result = await asyncio.to_thread(
+        build_dossier,
         idx, radio_id, window_seconds=window,
         recordings=_recordings, radio_state=radio_state,
     )
@@ -377,7 +381,12 @@ async def network_graph(
     if idx is None:
         return {"nodes": [], "edges": [], "window_seconds": window,
                 "generated_at": datetime.now().isoformat()}
-    return compute_talker_pairs(
+    # Off-loop: at 24h on a busy net this pulls hundreds of thousands of
+    # rows and runs an O(n) classification + O(pairs) accumulation in
+    # Python. Doing it synchronously freezes every other request,
+    # including the live snapshot WebSocket.
+    return await asyncio.to_thread(
+        compute_talker_pairs,
         idx, window_seconds=window, min_weight=min_weight, limit=limit,
     )
 
