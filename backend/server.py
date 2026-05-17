@@ -120,11 +120,22 @@ async def get_snapshot():
 async def list_recordings():
     if _recordings is None:
         return {"recordings": []}
-    return {"recordings": [r.model_dump(mode="json") for r in _recordings.list_recent()]}
+    # list_recent() iterdir's the calls dir and opens each WAV header — after
+    # weeks of recordings this is a synchronous scan of thousands of files,
+    # polled every 3 s by the dashboard. Hand it to a worker thread.
+    recent = await asyncio.to_thread(_recordings.list_recent)
+    return {"recordings": [r.model_dump(mode="json") for r in recent]}
 
 
 @app.get("/api/debug")
 async def debug_info():
+    # Two synchronous disk scans: list_recent() opens every WAV header, and
+    # the iterdir+stat loop below stats every file. Off-loop together so a
+    # debug-probe doesn't stall the live feed.
+    return await asyncio.to_thread(_debug_info_sync)
+
+
+def _debug_info_sync() -> dict:
     recs = _recordings.list_recent() if _recordings else []
     base = _recordings.base_dir if _recordings else None
     files_on_disk = []
@@ -216,7 +227,10 @@ async def export_events_csv(
 async def event_stats():
     if _event_log is None:
         return {}
-    return _event_log.stats()
+    # Iterates the in-memory ring buffer under a threading.Lock — small but
+    # still synchronous work; keep it off the event loop so WS pushes
+    # don't stall when stats.html polls every 5 s.
+    return await asyncio.to_thread(_event_log.stats)
 
 
 def _prefer_index():
@@ -244,7 +258,12 @@ async def quality_window(window: int = Query(3600, ge=60, le=7 * 86400)):
     SQLite index when available; falls back to scanning the JSONL.
     """
     path = _event_log.jsonl_path if _event_log is not None else None
-    return quality_ratios_over_window(path, window_seconds=window, index=_prefer_index())
+    # On a cold-start day before the index is populated this falls through to
+    # a full JSONL scan — hundreds of MB of disk reads on a long-running Pi.
+    # Off-loop so it never freezes the live WS feed.
+    return await asyncio.to_thread(
+        quality_ratios_over_window, path, window_seconds=window, index=_prefer_index(),
+    )
 
 
 def _history_filters(since, until, src, tgt, types):
@@ -278,6 +297,17 @@ async def history(
     if path is None:
         return {"events": [], "limit": limit, "offset": offset, "truncated": False}
     filters = _history_filters(since, until, src, tgt, types)
+    # The indexed path can materialise up to ``limit`` (= 20k max) JSON-decoded
+    # dicts; the fallback path walks the on-disk JSONL line-by-line. Both are
+    # synchronous and would block every other coroutine if run on the loop.
+    return await asyncio.to_thread(
+        _history_query_sync, path, filters, limit, offset,
+    )
+
+
+def _history_query_sync(
+    path: Path, filters: dict, limit: int, offset: int,
+) -> dict:
     idx = _prefer_index()
     if idx is not None:
         out = idx.query(limit=limit + 1, offset=offset, **filters)

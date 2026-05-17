@@ -9,6 +9,64 @@ Versioning follows [Semantic Versioning](https://semver.org/):
 Source of truth: `backend/__init__.py` (`__version__`). The dashboard
 footer shows the running build's version and `/api/version` exposes it.
 
+## [0.14.4] — 2026-05-17
+
+### Fixed — six lurking crash / freeze risks found in a full backend audit
+After fixing the v0.14.3 ``UnboundLocalError``, a follow-up sweep across
+``backend/`` looked for anything else that could either hard-crash the
+process or starve the asyncio loop long enough for the dashboard to
+feel frozen. Six items were addressed:
+
+1. **Heavy endpoints off the event loop.** Following the v0.14.2
+   pattern for ``/api/network`` and ``/api/radio/{id}``, the remaining
+   synchronous endpoints — ``/api/stats``, ``/api/quality``,
+   ``/api/history`` — are now dispatched via ``asyncio.to_thread``.
+   ``event_stats`` iterates the in-memory ring under a lock,
+   ``quality_window`` can fall through to a full JSONL scan on a
+   cold-start day, and ``history`` materialises up to 20 000 JSON-
+   decoded dicts per request. ``/api/history.csv`` already streams via
+   a regular generator (Starlette ``StreamingResponse`` runs those in
+   its threadpool), so it was left as-is.
+2. **`evaluator.tick()` off the event loop.** Every snapshot tick
+   (~1 s) the time-based alert rules run. With a ``QualitySpikeRule``
+   enabled, ``tick()`` issues three SQLite queries against the index;
+   on a Pi those can stall for tens of ms under writer contention.
+   Now wrapped in ``asyncio.to_thread`` from
+   ``cli.py::_periodic_snapshot``.
+3. **Recordings off the event loop.** ``/api/recordings`` is polled
+   every 3 s by the dashboard and calls
+   ``RecordingRegistry.list_recent()``, which iterdir's the calls dir
+   and opens every WAV header. After a week of uptime that's a sync
+   scan of thousands of files on the loop. Same for ``/api/debug``'s
+   stat-everything pass and the hourly
+   ``_periodic_wav_retention.prune_older_than()``. All three are now
+   ``asyncio.to_thread``'d.
+4. **Race on `Evaluator.subscribers`.** The set was mutated without
+   ``self._lock`` from ``subscribe()`` / ``unsubscribe()`` (asyncio
+   thread, via the WS handlers) and from ``_record()`` 's
+   dead-queue eviction (parser thread). Under contention this could
+   raise ``RuntimeError: Set changed size during iteration`` or
+   silently drop a fresh subscriber's first firing. All mutations now
+   take ``self._lock``, and ``_record`` collects dead queues into a
+   list and evicts them in a single critical section.
+5. **Uvicorn server task exception surfacing.** ``asyncio.create_task
+   (uv_server.serve())`` had no reference retained and no done
+   callback, so any unhandled exception in uvicorn (port-in-use,
+   socket error, internal bug) was swallowed when the task was GC'd
+   — the dashboard would go dark while the rest of the process kept
+   writing snapshots forever, with no operator signal. Now retains
+   the task and registers a callback that prints the exception to
+   stderr and sets ``stop_event`` so systemd can restart cleanly.
+6. **`state.tick()` defensive guard.** Wrapped in try/except in
+   ``_periodic_snapshot`` so any future regression in
+   ``_expire_idle_calls`` can't kill the snapshot loop and freeze the
+   dashboard.
+
+The audit also confirmed there are *no other* compound-assignment-on-
+bare-global traps anywhere in ``backend/`` — the v0.14.3 bug was
+unique. File-descriptor, subprocess, and WebSocket cleanup paths all
+release their resources on every exit path.
+
 ## [0.14.3] — 2026-05-17
 
 ### Fixed — UnboundLocalError that turned every clean shutdown into a real crash

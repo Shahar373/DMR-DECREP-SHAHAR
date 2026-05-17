@@ -127,7 +127,12 @@ async def _periodic_wav_retention(
         except asyncio.TimeoutError:
             pass
         try:
-            deleted, freed = recordings.prune_older_than(hours)
+            # Walks every WAV in calls_dir under stat + unlink. Off-loop so a
+            # janitor pass on a directory with thousands of files doesn't stall
+            # the snapshot/WS pipeline that shares the same event loop.
+            deleted, freed = await asyncio.to_thread(
+                recordings.prune_older_than, hours,
+            )
             if deleted:
                 print(
                     f"# wav-retention: deleted {deleted} files "
@@ -154,12 +159,20 @@ async def _periodic_snapshot(
         except asyncio.TimeoutError:
             pass
         now = datetime.now()
-        state.tick(now)
+        # state.tick walks active_calls to expire idles — defensive guard so
+        # any future regression in _expire_idle_calls can't kill the loop.
+        try:
+            state.tick(now)
+        except Exception as e:  # noqa: BLE001
+            print(f"# state.tick failed: {e}", file=sys.stderr)
         # Time-based alerts (cc_silent, quality_spike) live on this same
         # cadence — keeps us from spinning up yet another background task.
+        # quality_spike runs 3 SQLite queries against the index; with the
+        # writer thread flushing in parallel this can stall for tens of ms,
+        # so it goes to a worker thread.
         if evaluator is not None:
             try:
-                evaluator.tick(now)
+                await asyncio.to_thread(evaluator.tick, now)
             except Exception as e:  # noqa: BLE001
                 print(f"# alerts: tick failed: {e}", file=sys.stderr)
         try:
@@ -352,7 +365,23 @@ async def _run(args: argparse.Namespace) -> None:
         )
         uv_server = uvicorn.Server(config)
         uv_server.install_signal_handlers = lambda: None  # we handle signals
-        asyncio.create_task(uv_server.serve())
+        uv_task = asyncio.create_task(uv_server.serve())
+
+        # Without a callback, an unhandled exception in uvicorn.serve()
+        # (port-in-use, internal bug, etc.) is silently swallowed when the
+        # task is garbage-collected and the dashboard goes dark while the
+        # rest of the process keeps running. Surface it loudly and ask the
+        # main loop to shut down so systemd can restart us cleanly.
+        def _uv_done(t: asyncio.Task) -> None:
+            if t.cancelled():
+                return
+            exc = t.exception()
+            if exc is not None:
+                print(f"# uvicorn: server task exited with {exc!r}",
+                      file=sys.stderr)
+                stop_event.set()
+
+        uv_task.add_done_callback(_uv_done)
         print(f"# dashboard → http://0.0.0.0:{args.port}/", file=sys.stderr)
 
     snap_task = asyncio.create_task(

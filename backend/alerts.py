@@ -216,11 +216,16 @@ class Evaluator:
 
     def subscribe(self) -> asyncio.Queue:
         q: asyncio.Queue = asyncio.Queue(maxsize=50)
-        self.subscribers.add(q)
+        # subscribers is touched from both the asyncio thread (subscribe/
+        # unsubscribe via WS handlers) and the parser thread (_record's
+        # fan-out + dead-queue discard), so all mutations go through _lock.
+        with self._lock:
+            self.subscribers.add(q)
         return q
 
     def unsubscribe(self, q: asyncio.Queue) -> None:
-        self.subscribers.discard(q)
+        with self._lock:
+            self.subscribers.discard(q)
 
     # ── evaluation hooks ───────────────────────────────────────────────
 
@@ -367,11 +372,18 @@ class Evaluator:
             self.firings.append(firing)
             subs = list(self.subscribers)
         payload = firing.model_dump_json()
+        dead: list[asyncio.Queue] = []
         for q in subs:
             try:
                 q.put_nowait(payload)
             except asyncio.QueueFull:
-                self.subscribers.discard(q)
+                dead.append(q)
+        if dead:
+            # Evict in one critical section instead of mutating per-failure
+            # outside the lock (which raced against subscribe/unsubscribe).
+            with self._lock:
+                for q in dead:
+                    self.subscribers.discard(q)
 
 
 def rule_from_dict(data: dict) -> Rule:
