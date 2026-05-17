@@ -242,7 +242,7 @@ $('r-save').addEventListener('click', async () => {
   const kind = $('r-kind').value;
   const body = {
     kind, name: $('r-name').value.trim() || kind,
-    cooldown_seconds: parseInt($('r-cooldown').value, 10) || 0,
+    cooldown_seconds: Math.max(0, parseInt($('r-cooldown').value, 10) || 0),
   };
   if (kind === 'radio_keyup') {
     body.radio_ids = parseIds($('rf-radios').value);
@@ -294,9 +294,11 @@ async function loadRecent() {
   renderFirings();
 }
 
+let _wsReconnectDelay = 1000;
 function connectWs() {
   const proto = location.protocol === 'https:' ? 'wss' : 'ws';
   const ws = new WebSocket(`${proto}://${location.host}/ws/alerts`);
+  ws.onopen = () => { _wsReconnectDelay = 1000; };
   ws.onmessage = e => {
     try {
       const f = JSON.parse(e.data);
@@ -309,7 +311,12 @@ function connectWs() {
       }
     } catch (_) {}
   };
-  ws.onclose = ws.onerror = () => setTimeout(connectWs, 2000);
+  ws.onclose = ws.onerror = () => {
+    setTimeout(() => {
+      _wsReconnectDelay = Math.min(_wsReconnectDelay * 2, 16000);
+      connectWs();
+    }, _wsReconnectDelay);
+  };
 }
 
 fetch('/api/version').then(r => r.json()).then(v => {

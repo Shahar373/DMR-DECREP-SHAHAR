@@ -352,6 +352,17 @@ tr.has-gps { cursor: pointer; }
   cursor: pointer; font-size: 14px; line-height: 1;
 }
 .toast .t-x:hover { color: var(--red); }
+
+/* ── Keyboard-focus ring + reduced motion ──────────────────────── */
+:focus-visible {
+  outline: 2px solid var(--yellow);
+  outline-offset: 1px;
+  border-radius: 2px;
+}
+@media (prefers-reduced-motion: reduce) {
+  .toast, .dossier-panel, .dossier-backdrop { transition: none !important; }
+  .toast { transform: none !important; }
+}
 </style>
 </head>
 <body>
@@ -461,11 +472,12 @@ tr.has-gps { cursor: pointer; }
   <div>SLCO CRC: <span id="q-slco-crc">0</span></div>
   <div>Events: <span id="q-total">0</span></div>
   <div style="margin-left:auto">Updated: <span id="q-ts">—</span></div>
+  <div>Uptime: <span id="q-uptime">0s</span></div>
   <div id="version-tag" title="App version">v—</div>
 </div>
 
 <!-- Alerts toast bar -->
-<div id="toast-bar"></div>
+<div id="toast-bar" role="status" aria-live="polite" aria-atomic="false"></div>
 
 <!-- Per-radio Dossier slide-in panel -->
 <div id="dossier-backdrop" class="dossier-backdrop"></div>
@@ -635,7 +647,8 @@ function renderLSN(snap) {
     .sort(([a], [b]) => parseInt(a) - parseInt(b))
     .forEach(([lsn, s]) => {
       const chip = document.createElement('span');
-      chip.className = 'lsn-chip ' + (s.state === 'Active' ? 'active' : s.state === 'Rest' ? 'rest' : '');
+      const stateClass = s.state === 'Active' ? 'active' : s.state === 'Rest' ? 'rest' : '';
+      chip.className = stateClass ? `lsn-chip ${stateClass}` : 'lsn-chip';
       const star = parseInt(lsn) === rest ? '★ ' : '';
       chip.textContent = `${star}LSN ${lsn}: ${s.state}${s.tg ? ' TG' + s.tg : ''}`;
       bar.appendChild(chip);
@@ -876,14 +889,16 @@ function renderHistory(list) {
     const src = r.src != null ? r.src : '—';
     const tg = r.tgt != null ? `TG ${r.tgt}` : 'TG —';
     const slot = r.slot != null ? ` · slot ${r.slot}` : '';
-    const safeFilename = r.filename.replace(/'/g, "\\'");
     div.innerHTML = `
       <div class="hist-info">
         <div class="hist-line1">${src} → ${tg}</div>
         <div class="hist-line2">${fmtTime(r.started_at)} · ${fmtDuration(r.duration_seconds)}${slot}</div>
       </div>
-      <button class="hist-play" onclick="playRecording('${safeFilename}')">${isPlaying ? '⏸' : '▶'}</button>
+      <button class="hist-play" aria-label="Play recording">${isPlaying ? '⏸' : '▶'}</button>
     `;
+    // Capture filename by closure — avoids fragile inline-onclick string escaping
+    // and any XSS surface from unexpected characters in the filename.
+    div.querySelector('.hist-play').addEventListener('click', () => playRecording(r.filename));
     el.appendChild(div);
   });
 }
@@ -930,6 +945,21 @@ document.getElementById('export-csv').addEventListener('click', () => {
   // Plain navigation triggers the browser's download for attachment responses.
   window.location.href = '/api/events.csv';
 });
+
+// ── Session uptime clock ───────────────────────────────────────────
+const _bootAt = Date.now();
+const _uptimeEl = document.getElementById('q-uptime');
+function _fmtUptime(secs) {
+  const h = Math.floor(secs / 3600);
+  const m = Math.floor((secs % 3600) / 60);
+  const s = secs % 60;
+  if (h) return `${h}h${String(m).padStart(2,'0')}m`;
+  if (m) return `${m}m${String(s).padStart(2,'0')}s`;
+  return `${s}s`;
+}
+setInterval(() => {
+  if (_uptimeEl) _uptimeEl.textContent = _fmtUptime(Math.floor((Date.now() - _bootAt) / 1000));
+}, 1000);
 
 // ── Version tag (fetched once on load) ─────────────────────────────
 fetch('/api/version').then(r => r.ok ? r.json() : null).then(v => {
@@ -1024,13 +1054,22 @@ let _dossierTrack = null;
 function closeDossier() {
   dPanel.classList.remove('open');
   dBackdrop.classList.remove('open');
+  dPanel.setAttribute('aria-hidden', 'true');
+  if (_dossierMap) { _dossierMap.remove(); _dossierMap = null; _dossierTrack = null; }
+  if (_dossierLastFocus) { try { _dossierLastFocus.focus(); } catch (_) {} _dossierLastFocus = null; }
 }
 dBackdrop.addEventListener('click', closeDossier);
+let _dossierLastFocus = null;
+document.addEventListener('keydown', e => {
+  if (e.key === 'Escape' && dPanel.classList.contains('open')) closeDossier();
+});
 
 async function openDossier(id) {
   if (!id) return;
+  if (!dPanel.classList.contains('open')) _dossierLastFocus = document.activeElement;
   dPanel.classList.add('open');
   dBackdrop.classList.add('open');
+  dPanel.setAttribute('aria-hidden', 'false');
   document.getElementById('d-title').textContent = `Radio ${id}`;
   document.getElementById('d-body').innerHTML = '<section class="muted">Loading…</section>';
   try {
@@ -1055,12 +1094,16 @@ function renderDossier(d) {
   document.getElementById('d-title').textContent = `Radio ${d.id}`;
   document.getElementById('d-ip').textContent = d.ip || '—';
 
-  const chips = (d.top_co_talkers || []).map(c => `
+  const chips = (d.top_co_talkers || []).map(c => {
+    const tgs = Array.isArray(c.shared_tgs) ? c.shared_tgs : [];
+    const tgPart = tgs.length ? ' · TGs ' + tgs.join(',') : '';
+    return `
     <span class="chip ${c.kind === 'private' ? 'private' : ''}"
           onclick="openDossier(${c.id})"
-          title="${c.kind} · weight ${c.weight}${c.shared_tgs.length ? ' · TGs ' + c.shared_tgs.join(',') : ''}">
+          title="${c.kind} · weight ${c.weight}${tgPart}">
       ${c.id} <span style="color:var(--muted);font-size:10px">×${c.weight}</span>
-    </span>`).join('') || '<span class="muted">— none in window —</span>';
+    </span>`;
+  }).join('') || '<span class="muted">— none in window —</span>';
 
   const tgs = (d.tgs_touched || []).slice(0, 8).map(t =>
     `<div class="row"><span>TG ${t.tg}</span><span>${t.count}</span></div>`
@@ -1185,7 +1228,10 @@ function showAlertToast(firing) {
   const key = firing.rule_id + '@' + firing.fired_at;
   if (_toastSeen.has(key)) return;
   _toastSeen.add(key);
-  if (_toastSeen.size > 200) _toastSeen.clear();
+  // FIFO eviction — clearing the whole set would let replayed firings re-toast.
+  if (_toastSeen.size > 200) {
+    _toastSeen.delete(_toastSeen.values().next().value);
+  }
 
   const el = document.createElement('div');
   el.className = 'toast ' + (firing.kind || '');

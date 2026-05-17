@@ -245,7 +245,14 @@ function renderKV(el, entries, emptyMsg) {
 charts.types = makeDoughnut('c-types');
 charts.src   = makeBar('c-src');
 charts.tg    = makeBar('c-tg');
-charts.hour  = makeBar('c-hour', { indexAxis: 'x' });
+charts.hour  = makeBar('c-hour', {
+  indexAxis: 'x',
+  // When indexAxis flips, the numeric axis moves to Y — apply integer ticks there.
+  scales: {
+    x: { grid: { display: false } },
+    y: { grid: { color: '#21262d' }, ticks: { precision: 0 } },
+  },
+});
 
 function fmtPct(rate) {
   if (!Number.isFinite(rate)) return '—';

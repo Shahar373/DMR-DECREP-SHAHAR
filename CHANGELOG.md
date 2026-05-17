@@ -9,6 +9,63 @@ Versioning follows [Semantic Versioning](https://semver.org/):
 Source of truth: `backend/__init__.py` (`__version__`). The dashboard
 footer shows the running build's version and `/api/version` exposes it.
 
+## [0.14.0] — 2026-05-17
+
+### Fixed — UI bugs (second cosmetic pass)
+- **`stats.html`** — Hourly-activity chart: `precision: 0` was being
+  applied to the X axis (string labels) so the value axis could render
+  fractional tick labels like `1.5`. Moved the integer-ticks override to
+  the Y axis where the numeric data now lives after the `indexAxis: 'x'`
+  flip.
+- **`index.html`** Dossier panel — `top_co_talkers[].shared_tgs` is
+  optional in the API but the chip-tooltip code dereferenced
+  `.length` unconditionally, throwing for any co-talker that lacked the
+  field. Now guarded with `Array.isArray` + safe defaults.
+- **`index.html`** Alerts toast bar — when more than 200 firings had
+  been seen, the de-dupe set was *fully cleared* (`Set.clear()`),
+  meaning replayed firings could re-toast. Switched to FIFO eviction so
+  the most recent 200 keys are always remembered.
+- **`index.html`** Recordings list — `playRecording(filename)` was
+  passed via inline `onclick` with single-quote escaping only. Any
+  filename containing `<`, `>`, `"`, or a backslash would have broken
+  the markup (and provided an XSS surface). Now the button binds via
+  `addEventListener` and captures the filename through closure — zero
+  string interpolation into HTML.
+- **`alerts.html`** — Alerts WS reconnect had a fixed 2 s retry on
+  every disconnect, unlike `index.html` which already uses
+  exponential backoff up to 16 s. Aligned with the same backoff
+  policy so a flapping server isn't hammered.
+- **`alerts.html`** — `cooldown_seconds` is clamped to `>= 0` before
+  POST so a user can't slip a negative value past the `min="0"` UI
+  hint via DOM tinkering.
+- **`index.html`** Dossier panel — the embedded Leaflet map
+  (`_dossierMap`) was only torn down on the next `openDossier()`
+  call, leaking tile listeners between sessions. Now released in
+  `closeDossier()`.
+- **`index.html`** LSN-chip class — chips for states other than
+  `Active` / `Rest` were assigned a class string with a trailing
+  space (`"lsn-chip "`). Harmless visually but it broke
+  `classList.contains('lsn-chip')` if any caller ever tried to
+  query it. Cleaned up.
+
+### Added — small a11y / operator polish (design-council pack)
+- **`index.html`** — `Escape` now closes the Dossier slide-in panel
+  (previously keyboard users had to mouse to the "close" button or the
+  backdrop). Focus is restored to the element that opened the panel,
+  and `aria-hidden` is toggled.
+- **`index.html`** — Global `:focus-visible` ring (yellow, matches the
+  existing "selected row" accent) so keyboard tabbers can see where
+  they are without intruding on mouse users.
+- **`index.html`** — `prefers-reduced-motion: reduce` honored for the
+  toast slide-in and the Dossier panel transitions.
+- **`index.html`** — Toast bar is now a `role="status"` /
+  `aria-live="polite"` region so screen readers announce each new
+  alert without any visual change.
+- **`index.html`** — Footer now shows a `Uptime: HH:MM:SS` clock for
+  the current dashboard session, ticking every second. Lets the
+  operator correlate "how long have I been on this watch?" against the
+  buffered event count already in the same row.
+
 ## [0.13.0] — 2026-05-16
 
 ### Added — Alerts Engine
