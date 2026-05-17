@@ -9,6 +9,33 @@ Versioning follows [Semantic Versioning](https://semver.org/):
 Source of truth: `backend/__init__.py` (`__version__`). The dashboard
 footer shows the running build's version and `/api/version` exposes it.
 
+## [0.14.3] — 2026-05-17
+
+### Fixed — UnboundLocalError that turned every clean shutdown into a real crash
+- **`backend/server.py::push_snapshot`** used the compound assignment
+  ``_subscribers -= dead`` to evict WebSocket clients whose queue had
+  filled up. Python treats *any* assignment to a bare name as a local
+  binding, so the earlier read ``if _state is None or not
+  _subscribers:`` in the same function would raise
+  ``UnboundLocalError`` the moment that path was taken — i.e. the
+  first time a slow/stuck WS client triggered ``QueueFull``. Replaced
+  with an in-place ``_subscribers.difference_update(dead)`` (pure
+  method call, no rebinding) and added a comment so nobody repeats the
+  trick.
+
+  In practice this surfaced during the *intentional* watchdog-driven
+  restart: ``stream_subprocess`` raises ``RuntimeError("subprocess
+  liveness timeout …")`` after 60 s with no output from ``dsd-fme``;
+  the periodic snapshot loop then tries one last
+  ``push_snapshot()`` while shutting down, hits ``QueueFull`` on the
+  stuck client's queue, and instead of cleanly draining trips the
+  ``UnboundLocalError``. Result: what should have been a graceful
+  restart was logged as ``code=exited, status=1/FAILURE`` and felt to
+  the operator like a crash with no explanation. With this fix the
+  shutdown path stays clean; systemd's auto-restart still kicks in
+  but the dashboard recovers within seconds instead of looking like
+  it died.
+
 ## [0.14.2] — 2026-05-17
 
 ### Fixed — dashboard freezing on big windows (production crash)

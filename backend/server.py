@@ -103,7 +103,10 @@ async def push_snapshot() -> None:
             q.put_nowait(payload)
         except asyncio.QueueFull:
             dead.add(q)
-    _subscribers -= dead
+    # In-place mutation — using ``_subscribers -= dead`` here would rebind
+    # the name and Python would treat _subscribers as local for the whole
+    # function, raising UnboundLocalError on the early read above.
+    _subscribers.difference_update(dead)
 
 
 @app.get("/api/snapshot")
