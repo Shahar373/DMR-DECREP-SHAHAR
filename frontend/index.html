@@ -357,7 +357,6 @@ tr.has-gps { cursor: pointer; }
 :focus-visible {
   outline: 2px solid var(--yellow);
   outline-offset: 1px;
-  border-radius: 2px;
 }
 @media (prefers-reduced-motion: reduce) {
   .toast, .dossier-panel, .dossier-backdrop { transition: none !important; }
@@ -894,7 +893,7 @@ function renderHistory(list) {
         <div class="hist-line1">${src} → ${tg}</div>
         <div class="hist-line2">${fmtTime(r.started_at)} · ${fmtDuration(r.duration_seconds)}${slot}</div>
       </div>
-      <button class="hist-play" aria-label="Play recording">${isPlaying ? '⏸' : '▶'}</button>
+      <button class="hist-play" aria-label="${isPlaying ? 'Pause' : 'Play'} recording">${isPlaying ? '⏸' : '▶'}</button>
     `;
     // Capture filename by closure — avoids fragile inline-onclick string escaping
     // and any XSS surface from unexpected characters in the filename.

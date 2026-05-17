@@ -9,6 +9,19 @@ Versioning follows [Semantic Versioning](https://semver.org/):
 Source of truth: `backend/__init__.py` (`__version__`). The dashboard
 footer shows the running build's version and `/api/version` exposes it.
 
+## [0.14.1] — 2026-05-17
+
+### Fixed — self-review polish on the v0.14.0 a11y pack
+- **`index.html`** `:focus-visible` rule dropped its `border-radius: 2px`
+  declaration. The intent was to round the *outline*, but the rule was
+  actually rounding the *element* itself — meaning every focused
+  rectangular button/select briefly grew rounded corners on tab. The
+  outline already follows whatever radius the element has on its own.
+- **`index.html`** "Play recording" button now flips its `aria-label`
+  between `"Play recording"` and `"Pause recording"` to match the
+  glyph (`▶` / `⏸`). The previous fixed label misled screen readers
+  whenever a recording was playing.
+
 ## [0.14.0] — 2026-05-17
 
 ### Fixed — UI bugs (second cosmetic pass)
