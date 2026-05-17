@@ -147,3 +147,92 @@ def test_stream_subprocess_no_timeout_when_lines_keep_flowing():
 
     lines = asyncio.run(collect())
     assert lines == ["a\n", "b\n"]
+
+
+def test_stream_subprocess_with_retry_respawns_on_liveness_timeout():
+    """When the inner child stalls, the wrapper should kill it, sleep
+    briefly, spawn a fresh child, and keep yielding lines — without
+    bubbling RuntimeError up to the caller. The asyncio process stays
+    alive across the restart."""
+    import sys as _sys
+
+    from backend.wrapper import stream_subprocess_with_retry
+
+    # First child: prints one line then hangs forever (sleep). Second
+    # child: prints a different line then exits cleanly. Watchdog timeout
+    # is tight (0.4s) so the first child's stall trips fast.
+    state_path = "/tmp/_retry_state_marker"
+    try:
+        import os
+        if os.path.exists(state_path):
+            os.unlink(state_path)
+    except OSError:
+        pass
+
+    script = (
+        "import os, sys, time, pathlib;"
+        "marker = pathlib.Path('" + state_path + "');"
+        "first = not marker.exists();"
+        "marker.touch();"
+        "sys.stderr.write(('first\\n' if first else 'second\\n'));"
+        "sys.stderr.flush();"
+        # First run hangs (forces watchdog). Second run exits clean.
+        "(time.sleep(10) if first else None)"
+    )
+
+    async def collect():
+        stop = asyncio.Event()
+        gen = stream_subprocess_with_retry(
+            [_sys.executable, "-c", script],
+            stop_event=stop,
+            liveness_timeout=0.4,
+            backoff_seconds=0.1,
+        )
+        out: list[str] = []
+        async for line in gen:
+            out.append(line)
+            if "second" in line:
+                stop.set()
+                break
+        return out
+
+    lines = asyncio.run(collect())
+    try:
+        import os
+        os.unlink(state_path)
+    except OSError:
+        pass
+    assert "first\n" in lines
+    assert "second\n" in lines
+
+
+def test_stream_subprocess_with_retry_honours_stop_event():
+    """Setting stop_event should make the wrapper exit cleanly without
+    spawning another child, even mid-stream."""
+    import sys as _sys
+
+    from backend.wrapper import stream_subprocess_with_retry
+
+    async def go():
+        stop = asyncio.Event()
+        gen = stream_subprocess_with_retry(
+            [_sys.executable, "-c",
+             "import sys; sys.stderr.write('x\\n'); sys.stderr.flush()"],
+            stop_event=stop,
+            liveness_timeout=2.0,
+            backoff_seconds=0.05,
+        )
+        first = None
+        async for line in gen:
+            first = line
+            stop.set()
+            break
+        # Drain the rest — should exit promptly because stop is set.
+        rest = []
+        async for line in gen:
+            rest.append(line)
+        return first, rest
+
+    first, rest = asyncio.run(go())
+    assert first == "x\n"
+    assert rest == []

@@ -24,7 +24,7 @@ from typing import Optional
 
 from .models import Event, EventType
 from .state import StateManager, atomic_write_text
-from .wrapper import LineRunner, stream_file, stream_subprocess
+from .wrapper import LineRunner, stream_file, stream_subprocess_with_retry
 
 
 # Events that are worth showing live. The control-channel "heartbeat" events
@@ -408,7 +408,15 @@ async def _run(args: argparse.Namespace) -> None:
         ]
         print(f"# starting: {' '.join(cmd)}", file=sys.stderr)
         liveness = args.liveness_timeout if args.liveness_timeout > 0 else None
-        source = stream_subprocess(cmd, stop_event=stop_event, liveness_timeout=liveness)
+        # _with_retry keeps the asyncio loop alive across dsd-fme stalls.
+        # The watchdog still fires after `liveness_timeout` seconds of
+        # silence — but instead of crashing the whole service (and making
+        # systemd restart everything, which blacks out the dashboard for
+        # ~10s), we just respawn the child and the rest of the process
+        # carries on. The CLI flag default (60s) stays unchanged.
+        source = stream_subprocess_with_retry(
+            cmd, stop_event=stop_event, liveness_timeout=liveness,
+        )
     else:
         print(f"# replaying {args.replay} (delay={args.replay_delay}s)", file=sys.stderr)
         source = stream_file(args.replay, delay=args.replay_delay, stop_event=stop_event)

@@ -154,3 +154,57 @@ async def stream_file(
             yield line
             if delay > 0:
                 await asyncio.sleep(delay)
+
+
+async def stream_subprocess_with_retry(
+    args: list[str],
+    stop_event: Optional[asyncio.Event] = None,
+    env: Optional[dict] = None,
+    liveness_timeout: Optional[float] = None,
+    backoff_seconds: float = 2.0,
+) -> AsyncIterator[str]:
+    """Like ``stream_subprocess`` but respawns the child instead of
+    bubbling the timeout to the top of the process.
+
+    ``stream_subprocess`` raises ``RuntimeError`` when the liveness
+    watchdog fires (and just returns on EOF). Both paths would otherwise
+    propagate out of ``LineRunner.consume_lines`` → ``_run`` → ``asyncio.run``
+    and exit the whole service, leaning on systemd's ``Restart=on-failure``
+    to bring everything back up. That works but the dashboard goes dark
+    for 5–10 s on every recovery — and dsd-fme stalling silently for 60 s
+    is common enough on a slightly unstable PulseAudio chain to make
+    that visible to the operator.
+
+    This wrapper keeps the asyncio loop alive: on timeout / EOF we just
+    log, sleep ``backoff_seconds``, and spawn a fresh dsd-fme. WS clients,
+    HTTP handlers, the event log, the alerts pipeline and the snapshot
+    file all keep ticking — only the live event stream has a ~``liveness_timeout
+     + backoff_seconds`` gap.
+
+    ``stop_event`` is honoured before every restart attempt so a clean
+    shutdown still tears down promptly.
+    """
+    while True:
+        if stop_event is not None and stop_event.is_set():
+            return
+        restart_reason: Optional[str] = None
+        try:
+            async for line in stream_subprocess(
+                args, stop_event=stop_event, env=env,
+                liveness_timeout=liveness_timeout,
+            ):
+                yield line
+        except RuntimeError as exc:
+            restart_reason = str(exc)
+        else:
+            restart_reason = "child exited (EOF)"
+        if stop_event is not None and stop_event.is_set():
+            return
+        print(
+            f"# wrapper: restarting child after stall — {restart_reason}",
+            file=sys.stderr,
+        )
+        try:
+            await asyncio.sleep(backoff_seconds)
+        except asyncio.CancelledError:
+            return

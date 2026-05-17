@@ -9,6 +9,53 @@ Versioning follows [Semantic Versioning](https://semver.org/):
 Source of truth: `backend/__init__.py` (`__version__`). The dashboard
 footer shows the running build's version and `/api/version` exposes it.
 
+## [0.14.5] — 2026-05-17
+
+### Added — in-process dsd-fme respawn (no more visible "crashes" every ~30 min)
+
+The watchdog in ``stream_subprocess`` (added in v0.12.0) is intentional —
+when dsd-fme produces no stderr output for ``liveness_timeout`` seconds
+(60 s by default) the child is killed and a ``RuntimeError`` is raised.
+That signal was meant for systemd's ``Restart=on-failure`` to bring
+the service back up, and from a process-lifecycle POV it works fine.
+
+But on this operator's site the watchdog fires roughly every 30 minutes
+because the PulseAudio source + dsd-fme combination genuinely stalls
+that often. Each fire means: full Python process exits, systemd waits
+``RestartSec=5s``, the new process boots, re-opens the SQLite index
+(5 M+ rows), restores state from ``snapshot.json``, re-binds the HTTP
+socket. From the dashboard's POV that's 5–10 s of "site is down" every
+half hour. Operationally unacceptable for live monitoring.
+
+**New ``stream_subprocess_with_retry``** in ``backend/wrapper.py``
+wraps the existing ``stream_subprocess``: when the inner generator
+raises (watchdog fires) or returns (clean EOF — child exited), we log
+the reason, sleep ``backoff_seconds`` (default 2 s), and respawn the
+child. The yielded line stream is continuous from the caller's POV.
+
+Net effect:
+- Python process stays up across dsd-fme stalls — uvicorn keeps
+  serving, ``/ws`` clients stay connected, the event index stays
+  warm, snapshots keep being written.
+- Live event stream has a ~``liveness_timeout + backoff_seconds`` gap
+  (≈ 62 s with the defaults) but no visible restart, no "site is
+  down" outage.
+- ``stop_event`` is still honoured before every retry attempt, so
+  clean shutdown via SIGTERM behaves exactly as before.
+- If dsd-fme is genuinely broken (binary missing, persistent crash
+  loop), it just keeps respawning every 62 s — operator still sees
+  the empty event feed and the recorded errors in the journal, but
+  the dashboard itself stays up so they can investigate.
+
+``backend/cli.py`` now calls ``stream_subprocess_with_retry`` instead
+of ``stream_subprocess`` for the ``--live`` path. The CLI flag
+``--liveness-timeout`` and its default (60 s) are unchanged — the
+watchdog still fires at the same cadence, it just no longer kills
+the whole service.
+
+Two new tests cover the retry path: stall→respawn→fresh-output, and
+stop_event honoured mid-stream.
+
 ## [0.14.4] — 2026-05-17
 
 ### Fixed — six lurking crash / freeze risks found in a full backend audit
