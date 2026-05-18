@@ -143,6 +143,52 @@ async def _periodic_wav_retention(
             print(f"# wav-retention: pass failed: {e}", file=sys.stderr)
 
 
+async def _periodic_event_retention(
+    event_log,
+    hours: float,
+    stop_event: asyncio.Event,
+    interval_seconds: float = 3600.0,
+    startup_delay_seconds: float = 300.0,
+) -> None:
+    """Hourly background task that deletes events older than the retention
+    window from both the SQLite index and the on-disk JSONL.
+
+    First pass waits ``startup_delay_seconds`` after boot so the dashboard
+    becomes responsive before the (potentially multi-GB) first rewrite
+    starts. Each pass runs entirely on a worker thread, so the asyncio
+    loop keeps serving HTTP/WS during the slow chunked DELETE + VACUUM +
+    JSONL rewrite.
+    """
+    if event_log is None or hours <= 0:
+        return
+    # Give the dashboard a few minutes of warm-up before the first big prune.
+    try:
+        await asyncio.wait_for(stop_event.wait(), timeout=startup_delay_seconds)
+        return  # stop signalled during the delay
+    except asyncio.TimeoutError:
+        pass
+    from datetime import timedelta as _td
+    while not stop_event.is_set():
+        cutoff = datetime.now() - _td(hours=hours)
+        try:
+            metrics = await asyncio.to_thread(event_log.prune_older_than, cutoff)
+            if metrics["db_deleted"] or metrics["jsonl_bytes_freed"]:
+                print(
+                    f"# event-retention: pruned {metrics['db_deleted']} DB rows, "
+                    f"kept {metrics['jsonl_lines_kept']} JSONL lines, freed "
+                    f"{metrics['jsonl_bytes_freed']/1024/1024:.1f} MiB "
+                    f"(cutoff < {cutoff.isoformat(timespec='seconds')})",
+                    file=sys.stderr,
+                )
+        except Exception as e:  # noqa: BLE001
+            print(f"# event-retention: pass failed: {e}", file=sys.stderr)
+        try:
+            await asyncio.wait_for(stop_event.wait(), timeout=interval_seconds)
+            break
+        except asyncio.TimeoutError:
+            pass
+
+
 async def _periodic_snapshot(
     state: StateManager,
     path: Path,
@@ -254,6 +300,11 @@ def _parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
                    help="delete per-call WAVs in --calls-dir older than this "
                         "many hours; checked once an hour (default: %(default)s, "
                         "0 disables)")
+    p.add_argument("--event-retention-hours", type=float, default=0.0,
+                   help="delete events older than this many hours from both "
+                        "the SQLite index and the JSONL; checked once an hour "
+                        "(default: %(default)s, 0 disables — events kept "
+                        "forever)")
     p.add_argument("--alerts-rules", default="alerts.json",
                    help="path to the Alerts Engine rules file "
                         "(default: %(default)s, empty string disables)")
@@ -396,6 +447,14 @@ async def _run(args: argparse.Namespace) -> None:
             _periodic_wav_retention(recordings, args.wav_retention_hours, stop_event)
         )
 
+    event_retention_task: Optional[asyncio.Task] = None
+    if args.event_retention_hours > 0:
+        event_retention_task = asyncio.create_task(
+            _periodic_event_retention(
+                event_log, args.event_retention_hours, stop_event,
+            )
+        )
+
     if args.live:
         # dsd-fme writes per-call WAVs to --calls-dir via `-7 <dir> -P`.
         # `-7` must come BEFORE `-P` per the dsd-fme help.
@@ -438,6 +497,12 @@ async def _run(args: argparse.Namespace) -> None:
             retention_task.cancel()
             try:
                 await retention_task
+            except asyncio.CancelledError:
+                pass
+        if event_retention_task is not None:
+            event_retention_task.cancel()
+            try:
+                await event_retention_task
             except asyncio.CancelledError:
                 pass
         event_log.close()

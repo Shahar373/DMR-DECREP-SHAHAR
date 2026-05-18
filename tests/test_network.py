@@ -17,8 +17,16 @@ from backend.models import (
 )
 
 
+# Anchor on wall-clock time (one hour ago) so the synthetic events always
+# fall inside the network endpoint's 7-day max window — the endpoint
+# computes ``now - window`` itself and there's no hook to override it from
+# a test. Captured once at import so every event in a single test run
+# shares the same baseline.
+_TS_BASE = datetime.now() - timedelta(hours=1)
+
+
 def _ts(seconds: int = 0) -> datetime:
-    return datetime(2026, 5, 10, 21, 0, 0) + timedelta(seconds=seconds)
+    return _TS_BASE + timedelta(seconds=seconds)
 
 
 def _voice(sec: int, src: int, tgt: int, slot: int = 1) -> VoiceCallEvent:
@@ -157,7 +165,9 @@ def test_network_endpoint_smoke(tmp_path: Path) -> None:
     srv.attach_event_log(log)
     try:
         client = TestClient(srv.app)
-        # Use a very wide window so the synthetic 2026 timestamps land in it.
+        # The endpoint computes ``now - window`` itself (no override hook),
+        # so the events must be anchored close enough to wall-clock time
+        # that the 7-day max window includes them.
         resp = client.get("/api/network", params={"window": 7 * 86400, "min_weight": 1})
         assert resp.status_code == 200
         data = resp.json()

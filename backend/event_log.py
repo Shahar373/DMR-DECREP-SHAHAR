@@ -281,6 +281,142 @@ class EventLog:
     def index(self) -> Optional[EventIndex]:
         return self._index
 
+    # --- retention ---
+
+    def prune_older_than(self, cutoff: datetime) -> dict:
+        """Drop events older than ``cutoff`` from both the SQLite index
+        and the on-disk JSONL.
+
+        Two-phase JSONL rewrite to keep the writer lock free during the
+        slow part:
+
+        1. Read the JSONL **up to its current EOF** through a separate
+           file handle and write only the surviving lines to
+           ``<jsonl>.new``. Concurrent ``append()`` calls keep going to
+           the original file with no contention.
+        2. Briefly take ``self._lock``: flush + close the writer,
+           append any tail bytes that arrived during phase 1 to the new
+           file (guaranteed newer than the cutoff because they were
+           just written), atomic-rename the new file over the old, and
+           reopen the writer.
+
+        The lock-hold time is bounded by the small tail catch-up plus
+        the rename — usually well under 100 ms — so the asyncio loop
+        keeps pumping even during the multi-GB first pass.
+
+        Returns a dict with ``db_deleted``, ``jsonl_lines_kept`` and
+        ``jsonl_bytes_freed`` for the operator log.
+        """
+        metrics: dict[str, int] = {
+            "db_deleted": 0,
+            "jsonl_lines_kept": 0,
+            "jsonl_bytes_freed": 0,
+        }
+
+        if self._index is not None:
+            try:
+                metrics["db_deleted"] = self._index.prune_older_than(cutoff)
+                if metrics["db_deleted"] > 0:
+                    # Reclaim disk after the first big prune. Subsequent
+                    # passes have small working sets so VACUUM is cheap.
+                    self._index.vacuum()
+            except Exception as exc:  # noqa: BLE001
+                print(f"# event-retention: DB prune failed ({exc})", file=sys.stderr)
+
+        if self.jsonl_path is None or not self.jsonl_path.exists():
+            return metrics
+
+        cutoff_iso = cutoff.isoformat()
+        tmp_path = self.jsonl_path.with_suffix(".jsonl.new")
+        try:
+            tmp_path.unlink()
+        except FileNotFoundError:
+            pass
+
+        # Phase 1 — lock-free rewrite of everything up to the current EOF.
+        snapshot_size = self.jsonl_path.stat().st_size
+        bytes_read = 0
+        kept_lines = 0
+        try:
+            with open(self.jsonl_path, "r", encoding="utf-8", errors="replace") as src, \
+                 open(tmp_path, "w", encoding="utf-8") as dst:
+                for line in src:
+                    bytes_read += len(line.encode("utf-8", errors="replace"))
+                    if bytes_read > snapshot_size:
+                        # We've gone past the EOF we recorded at start —
+                        # the rest is fresh writes, handled under the lock.
+                        break
+                    try:
+                        obj = json.loads(line)
+                    except (ValueError, TypeError):
+                        continue
+                    ts = obj.get("timestamp")
+                    if not isinstance(ts, str) or ts < cutoff_iso:
+                        continue
+                    dst.write(line)
+                    kept_lines += 1
+        except OSError as exc:
+            print(f"# event-retention: JSONL rewrite failed ({exc})", file=sys.stderr)
+            try:
+                tmp_path.unlink()
+            except FileNotFoundError:
+                pass
+            return metrics
+
+        # Phase 2 — brief lock-hold for the tail catch-up + atomic swap.
+        with self._lock:
+            old_size = self.jsonl_path.stat().st_size
+            if self._fh is not None:
+                try:
+                    self._fh.flush()
+                except OSError:
+                    pass
+                try:
+                    self._fh.close()
+                except OSError:
+                    pass
+                self._fh = None
+
+            # Append any bytes written to the original file during phase 1.
+            # These are guaranteed newer than ``cutoff`` because they were
+            # appended *after* ``snapshot_size`` was sampled, so no filter.
+            if old_size > snapshot_size:
+                try:
+                    with open(self.jsonl_path, "rb") as src, \
+                         open(tmp_path, "ab") as dst:
+                        src.seek(snapshot_size)
+                        tail = src.read(old_size - snapshot_size)
+                        if tail:
+                            dst.write(tail)
+                            kept_lines += tail.count(b"\n")
+                except OSError as exc:
+                    print(
+                        f"# event-retention: tail catch-up failed ({exc})",
+                        file=sys.stderr,
+                    )
+
+            try:
+                tmp_path.replace(self.jsonl_path)
+            except OSError as exc:
+                print(f"# event-retention: rename failed ({exc})", file=sys.stderr)
+
+            try:
+                self._fh = open(
+                    self.jsonl_path, "a", buffering=1, encoding="utf-8",
+                )
+            except OSError as exc:
+                print(
+                    f"# event-retention: writer reopen failed ({exc}); "
+                    "the live event log will stop persisting until restart",
+                    file=sys.stderr,
+                )
+                self._fh = None
+
+        new_size = self.jsonl_path.stat().st_size if self.jsonl_path.exists() else 0
+        metrics["jsonl_lines_kept"] = kept_lines
+        metrics["jsonl_bytes_freed"] = max(0, old_size - new_size)
+        return metrics
+
     # --- write path ---
 
     def append(self, ev: Event) -> None:

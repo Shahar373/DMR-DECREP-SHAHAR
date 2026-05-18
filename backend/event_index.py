@@ -395,3 +395,58 @@ class EventIndex:
                     self._conn.close()
                 except sqlite3.Error:
                     pass
+
+    # --- retention ---
+
+    def prune_older_than(
+        self, cutoff: datetime, chunk_size: int = 50_000,
+    ) -> int:
+        """Delete all rows with ``ts < cutoff``. Returns total rows removed.
+
+        Done in chunks so the write transaction doesn't lock the DB for
+        minutes when the first prune has millions of rows to remove. After
+        each chunk the WAL is committed, giving readers a chance to
+        proceed between batches.
+        """
+        cutoff_iso = cutoff.isoformat()
+        total = 0
+        # rowid-IN is required because vanilla SQLite builds don't include
+        # the SQLITE_ENABLE_UPDATE_DELETE_LIMIT compile flag.
+        sql = (
+            "DELETE FROM events WHERE rowid IN ("
+            "  SELECT rowid FROM events WHERE ts < ? LIMIT ?"
+            ")"
+        )
+        while True:
+            with self._lock:
+                if self._closed:
+                    break
+                self._commit_locked()  # flush pending writes first
+                cur = self._conn.execute(sql, (cutoff_iso, chunk_size))
+                removed = cur.rowcount
+                self._conn.commit()
+            if removed <= 0:
+                break
+            total += removed
+            if removed < chunk_size:
+                break
+        return total
+
+    def vacuum(self) -> None:
+        """Rebuild the DB file to reclaim space freed by prune_older_than.
+
+        VACUUM takes an exclusive lock; with WAL + synchronous=NORMAL this
+        still queues writes for the duration. After the first big prune
+        (multi-GB → tens of MB) it can run for tens of seconds; on
+        subsequent prunes the working set is small and VACUUM is fast.
+        """
+        with self._lock:
+            if self._closed:
+                return
+            self._commit_locked()
+            # VACUUM cannot run inside an explicit transaction.
+            self._conn.isolation_level = None
+            try:
+                self._conn.execute("VACUUM")
+            finally:
+                self._conn.isolation_level = ""

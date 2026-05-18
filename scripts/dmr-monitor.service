@@ -9,7 +9,8 @@ ExecStart=/home/shahar/DMR-DECREP-SHAHAR/.venv/bin/python -m backend.cli \
     --input pulse:dmr_capture.monitor \
     --calls-dir /tmp/dmr_calls \
     --serve \
-    --port 8080
+    --port 8080 \
+    --event-retention-hours 48
 Restart=on-failure
 RestartSec=5s
 Environment=PYTHONUNBUFFERED=1

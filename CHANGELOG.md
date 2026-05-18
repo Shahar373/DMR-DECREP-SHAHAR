@@ -9,6 +9,81 @@ Versioning follows [Semantic Versioning](https://semver.org/):
 Source of truth: `backend/__init__.py` (`__version__`). The dashboard
 footer shows the running build's version and `/api/version` exposes it.
 
+## [0.15.0] — 2026-05-17
+
+### Added — event retention (bounded working set, scales for the long haul)
+
+Until now the on-disk event store grew without bound: the JSONL was
+append-only forever and the SQLite index just kept inserting. On this
+operator's Pi after a week of uptime that meant ``events.jsonl`` =
+1.3 GB and ``events.db`` = 2.3 GB with 5.4 M rows, which (a) made
+heavy queries slow even with the index, (b) made every restart
+re-open a multi-GB DB, and (c) was hours away from filling the
+remaining SD-card free space.
+
+The fix is a new background pruner that drops everything older than
+a configurable window. Default is **0 (disabled)** so existing
+deployments don't change behaviour; the project's ``dmr-monitor.service``
+unit ships with ``--event-retention-hours 48`` for the deployed Pi.
+
+**Mechanics**
+
+1. New ``EventIndex.prune_older_than(cutoff, chunk_size=50_000)`` does a
+   chunked ``DELETE FROM events WHERE rowid IN (SELECT rowid … LIMIT
+   ?)`` loop so the write transaction never locks the DB for minutes
+   when the first prune has millions of rows to remove. After each
+   chunk the WAL commits, giving readers a chance to interleave.
+2. New ``EventIndex.vacuum()`` reclaims the freed pages — invoked once
+   per prune cycle whenever any rows were removed. The first VACUUM
+   after the big initial delete is slow (multi-GB → tens of MB), but
+   it runs once; subsequent VACUUMs are tiny.
+3. New ``EventLog.prune_older_than(cutoff)`` orchestrates both layers
+   and rewrites the JSONL in **two phases**:
+   * **Phase 1 — lock-free.** Read the JSONL through a fresh handle
+     up to its current EOF and write the survivors to ``events.jsonl.new``.
+     Concurrent ``append()`` calls keep going to the original file with
+     no contention, so the asyncio loop stays responsive even though
+     we're walking a 1 GB file.
+   * **Phase 2 — brief lock-hold.** Take the writer lock, append any
+     tail bytes that arrived during phase 1 (guaranteed newer than the
+     cutoff because they were just appended), atomic-rename the new
+     file over the old, and reopen the writer. Typical lock-hold time
+     is well under 100 ms.
+4. New ``--event-retention-hours N`` CLI flag and matching background
+   task ``_periodic_event_retention`` that runs once an hour. The
+   *first* pass is deferred by 5 minutes after boot so the dashboard
+   warms up before the (potentially multi-GB) first rewrite starts.
+   Each pass executes on a worker thread via
+   ``asyncio.to_thread``, so HTTP / WS keep flowing through the
+   entire chunked DELETE + VACUUM + JSONL rewrite.
+5. Successful passes log a single line to stderr / journal:
+   ``# event-retention: pruned <N> DB rows, kept <M> JSONL lines,
+   freed <X.X> MiB (cutoff < …)``.
+
+**Expected effect on the deployed Pi after the first prune at 48 h
+retention**
+
+- ``events.db``: 2.3 GB → ~50 MB (data) → ~50 MB on disk after VACUUM
+- ``events.jsonl``: 1.3 GB → ~30 MB
+- Service restart re-open of the index: from tens of seconds → instant
+- ``/api/network`` and ``/api/radio/{id}`` on a 24 h window:
+  materialise tens of thousands of rows instead of half a million
+
+Four new tests cover the prune path:
+``test_eventindex_prune_older_than_removes_rows_chunked``,
+``test_eventindex_prune_idempotent_when_nothing_to_remove``,
+``test_eventlog_prune_rewrites_jsonl_and_keeps_writer_open``,
+``test_eventlog_prune_preserves_concurrent_appends``.
+
+### Fixed — `test_network_endpoint_smoke` was wall-clock-sensitive
+
+The test seeded events at a fixed ``datetime(2026, 5, 10, ...)`` baseline
+and asked the live endpoint for a 7-day network graph. Once real time
+moved past 2026-05-17 the events fell outside ``now − 7 d`` and the
+test started failing. Anchored ``_ts`` on ``datetime.now() − 1 h`` so
+the synthetic events always land inside the window the endpoint will
+accept.
+
 ## [0.14.5] — 2026-05-17
 
 ### Added — in-process dsd-fme respawn (no more visible "crashes" every ~30 min)
