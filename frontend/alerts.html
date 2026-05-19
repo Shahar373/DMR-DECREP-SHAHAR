@@ -302,6 +302,7 @@ function connectWs() {
   ws.onmessage = e => {
     try {
       const f = JSON.parse(e.data);
+      if (f.type === '_ping') return;
       // De-dupe by (rule_id, fired_at).
       const key = f.rule_id + '@' + f.fired_at;
       if (!_firingsList.some(x => x.rule_id + '@' + x.fired_at === key)) {

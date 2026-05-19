@@ -784,7 +784,7 @@ function connect() {
 
   ws.onmessage = e => {
     _lastWsMsgAt = Date.now();
-    try { render(JSON.parse(e.data)); } catch (_) {}
+    try { const s = JSON.parse(e.data); if (s.type !== '_ping') render(s); } catch (_) {}
   };
 
   ws.onclose = ws.onerror = () => {
@@ -1268,7 +1268,7 @@ function _connectAlertsWs() {
   _alertsWs = new WebSocket(`${proto}://${location.host}/ws/alerts`);
   _alertsWs.onopen = () => { _alertsReconnect = 1000; };
   _alertsWs.onmessage = e => {
-    try { showAlertToast(JSON.parse(e.data)); } catch (_) {}
+    try { const f = JSON.parse(e.data); if (f.type !== '_ping') showAlertToast(f); } catch (_) {}
   };
   _alertsWs.onclose = _alertsWs.onerror = () => {
     setTimeout(() => {

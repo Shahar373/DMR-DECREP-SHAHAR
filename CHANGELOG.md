@@ -9,6 +9,48 @@ Versioning follows [Semantic Versioning](https://semver.org/):
 Source of truth: `backend/__init__.py` (`__version__`). The dashboard
 footer shows the running build's version and `/api/version` exposes it.
 
+## [0.15.1] — 2026-05-19
+
+### Fixed — WebSocket task leak and systemd crash-loop hardening
+
+**WebSocket dead-client leak (server.py)**
+
+Both `/ws` and `/ws/alerts` used a bare `await q.get()` that blocks
+forever when a client disappears without a clean TCP FIN (network drop,
+proxy timeout, NAT eviction). The specific failure modes:
+
+* `/ws` — once a dead client's queue fills up, it is evicted from
+  `_subscribers` by `push_snapshot()`, but its asyncio task keeps
+  running, blocked on a queue that nobody will ever push to again.
+* `/ws/alerts` — alerts are infrequent so the queue rarely fills;
+  a dead client's task ran until process restart (hours).
+
+Fix: both endpoints now use `asyncio.wait_for(q.get(), timeout=30)`.
+On timeout the eviction case breaks out immediately; the alive-but-quiet
+case sends a `{"type":"_ping"}` keepalive frame and loops.  If the
+underlying socket is dead the send raises, and the task exits cleanly.
+All three frontend onmessage handlers (`index.html` ×2, `alerts.html`)
+now guard against `type === "_ping"` so no garbage is rendered.
+
+**systemd crash-loop prevention (dmr-monitor.service)**
+
+`Restart=on-failure` with no `StartLimitBurst` means a service that
+crashes on startup (wrong audio device, port already bound, etc.) can
+restart hundreds of times, filling the journal and keeping the system
+busy.  Added:
+
+* `StartLimitBurst=5` + `StartLimitIntervalSec=120s` — systemd stops
+  restarting after 5 attempts in 2 minutes and enters a failed state,
+  making the problem visible without log-spam.
+* `RestartSec=10s` (was 5 s) — gives the audio device or port a few
+  extra seconds to settle between attempts.
+* `MemoryMax=384M` — caps RSS so a slow memory leak can't OOM the Pi.
+* `StandardOutput/StandardError=journal` — logs now appear in
+  `journalctl -u dmr-monitor` for easy operator inspection.
+* Comment added warning that `--calls-dir /tmp/dmr_calls` is wiped on
+  reboot; operators who need persistent recordings should point it at
+  `/var/lib/dmr-monitor/calls` or similar.
+
 ## [0.15.0] — 2026-05-17
 
 ### Added — event retention (bounded working set, scales for the long haul)
