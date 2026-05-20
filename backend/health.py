@@ -81,6 +81,7 @@ def compute_health(
     db_path: Optional[Path] = None,
     snapshot_path: Optional[Path] = None,
     calls_dir: Optional[Path] = None,
+    writer_health: Optional[dict] = None,
     now: Optional[datetime] = None,
 ) -> dict:
     """Build the health dict. Pure — no I/O failure can raise out of it."""
@@ -108,4 +109,5 @@ def compute_health(
             "free_bytes": _safe_free_bytes(jsonl_path or snapshot_path),
         },
         "calls_dir": _calls_dir_summary(calls_dir),
+        "writer": writer_health or {"write_errors": 0, "last_write_error": None},
     }

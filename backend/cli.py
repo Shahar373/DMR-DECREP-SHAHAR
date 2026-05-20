@@ -189,6 +189,53 @@ async def _periodic_event_retention(
             pass
 
 
+async def _periodic_fsync(
+    event_log,
+    stop_event: asyncio.Event,
+    interval_seconds: float = 5.0,
+) -> None:
+    """Force the events JSONL to disk every ``interval_seconds``.
+
+    With ``buffering=1`` the writer puts every newline-terminated event
+    into the kernel page cache immediately, but the kernel itself may
+    hold those pages for tens of seconds before flushing.  On a sudden
+    power loss anything still in the cache is lost — so we drive an
+    explicit fsync on a fixed cadence to bound that loss.
+    """
+    if event_log is None:
+        return
+    while not stop_event.is_set():
+        try:
+            await asyncio.wait_for(stop_event.wait(), timeout=interval_seconds)
+            break
+        except asyncio.TimeoutError:
+            pass
+        try:
+            await asyncio.to_thread(event_log.fsync_to_disk)
+        except Exception as e:  # noqa: BLE001 — never let durability take the service down
+            print(f"# event-log: fsync pass failed: {e}", file=sys.stderr)
+
+
+def _surface_task_exception(name: str):
+    """Done-callback factory for background asyncio.create_task() calls.
+
+    Without this an unhandled exception in a background task is only
+    visible when Python eventually GCs the Task — operators see no
+    indication that retention/snapshot/fsync has silently stopped.
+    """
+    def _cb(task: asyncio.Task) -> None:
+        if task.cancelled():
+            return
+        exc = task.exception()
+        if exc is not None:
+            print(
+                f"# background task {name!r} exited with {exc!r} — "
+                "this subsystem is now dead until restart",
+                file=sys.stderr,
+            )
+    return _cb
+
+
 async def _periodic_snapshot(
     state: StateManager,
     path: Path,
@@ -441,11 +488,17 @@ async def _run(args: argparse.Namespace) -> None:
             args.serve, evaluator=evaluator,
         )
     )
+    snap_task.add_done_callback(_surface_task_exception("snapshot"))
+
+    fsync_task = asyncio.create_task(_periodic_fsync(event_log, stop_event))
+    fsync_task.add_done_callback(_surface_task_exception("fsync"))
+
     retention_task: Optional[asyncio.Task] = None
     if recordings is not None and args.wav_retention_hours > 0:
         retention_task = asyncio.create_task(
             _periodic_wav_retention(recordings, args.wav_retention_hours, stop_event)
         )
+        retention_task.add_done_callback(_surface_task_exception("wav-retention"))
 
     event_retention_task: Optional[asyncio.Task] = None
     if args.event_retention_hours > 0:
@@ -454,6 +507,7 @@ async def _run(args: argparse.Namespace) -> None:
                 event_log, args.event_retention_hours, stop_event,
             )
         )
+        event_retention_task.add_done_callback(_surface_task_exception("event-retention"))
 
     if args.live:
         # dsd-fme writes per-call WAVs to --calls-dir via `-7 <dir> -P`.
@@ -491,6 +545,11 @@ async def _run(args: argparse.Namespace) -> None:
         snap_task.cancel()
         try:
             await snap_task
+        except asyncio.CancelledError:
+            pass
+        fsync_task.cancel()
+        try:
+            await fsync_task
         except asyncio.CancelledError:
             pass
         if retention_task is not None:

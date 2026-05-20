@@ -174,8 +174,14 @@ async def get_health():
         last_event_at = getattr(_state, "_last_event_at", None)
     jsonl_path = _event_log.jsonl_path if _event_log is not None else None
     db_path = None
-    if _event_log is not None and _event_log.index is not None:
-        db_path = _event_log.index.db_path
+    writer_health: Optional[dict] = None
+    if _event_log is not None:
+        if _event_log.index is not None:
+            db_path = _event_log.index.db_path
+        try:
+            writer_health = _event_log.write_health()
+        except Exception:  # noqa: BLE001 — health must never raise
+            writer_health = None
     calls_dir = _recordings.base_dir if _recordings is not None else None
     return compute_health(
         version=__version__,
@@ -187,6 +193,7 @@ async def get_health():
         db_path=db_path,
         snapshot_path=_snapshot_path,
         calls_dir=calls_dir,
+        writer_health=writer_health,
     )
 
 
