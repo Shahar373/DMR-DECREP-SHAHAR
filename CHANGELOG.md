@@ -9,6 +9,19 @@ Versioning follows [Semantic Versioning](https://semver.org/):
 Source of truth: `backend/__init__.py` (`__version__`). The dashboard
 footer shows the running build's version and `/api/version` exposes it.
 
+## [0.16.1] — 2026-06-05
+
+### Added
+
+- **Reset / Clear All Data** — new `POST /api/reset` endpoint that wipes all
+  in-memory state (radios, active calls, quality counters), truncates the
+  on-disk JSONL event log, clears the SQLite index, and removes the
+  `snapshot.json` file so a subsequent service restart also starts clean.
+  A red **↺ Reset** button in the dashboard header triggers the endpoint
+  with a confirmation prompt, then reloads the page to reflect the blank
+  slate. Useful when switching analysis sessions or discarding data from a
+  previous shift.
+
 ## [0.16.0] — 2026-05-20
 
 ### Fixed — second stability pass: concurrency, durability, observability

@@ -540,6 +540,23 @@ async def ws_alerts(websocket: WebSocket):
         _evaluator.unsubscribe(q)
 
 
+@app.post("/api/reset")
+async def reset_all_data():
+    """Erase all accumulated state: radios, events, SQLite index, and snapshot file."""
+    if _state is not None:
+        _state.reset()
+    if _event_log is not None:
+        _event_log.clear()
+    if _snapshot_path is not None:
+        for p in (_snapshot_path, _snapshot_path.with_suffix(".bak")):
+            try:
+                p.unlink(missing_ok=True)
+            except OSError:
+                pass
+    await push_snapshot()
+    return {"status": "reset", "cleared_at": datetime.now().isoformat()}
+
+
 @app.get("/alerts")
 async def alerts_page():
     return HTMLResponse((FRONTEND_DIR / "alerts.html").read_text(encoding="utf-8"))

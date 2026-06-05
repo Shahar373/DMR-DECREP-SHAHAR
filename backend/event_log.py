@@ -269,6 +269,28 @@ class EventLog:
                     loaded += 1
         return loaded
 
+    def clear(self) -> None:
+        """Empty the ring buffer and truncate the on-disk JSONL (and index)."""
+        with self._lock:
+            self._buf.clear()
+            if self._fh is not None:
+                try:
+                    self._fh.close()
+                except OSError:
+                    pass
+                self._fh = None
+            if self.jsonl_path is not None:
+                try:
+                    self.jsonl_path.unlink(missing_ok=True)
+                except OSError:
+                    pass
+                self._fh = open(self.jsonl_path, "a", buffering=1, encoding="utf-8")
+        if self._index is not None:
+            try:
+                self._index.clear()
+            except Exception:  # noqa: BLE001
+                pass
+
     def close(self) -> None:
         with self._lock:
             if self._fh is not None:
