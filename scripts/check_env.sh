@@ -17,6 +17,15 @@ print_result() {
     printf "[%b] %-22s %s\n" "$1" "$2" "${3:-}"
 }
 
+# 0. CPU architecture (informational — Raspberry Pi 5 is aarch64)
+check_arch() {
+    local osname=""
+    if [ -r /etc/os-release ]; then
+        osname=$(. /etc/os-release 2>/dev/null && echo "${PRETTY_NAME:-}")
+    fi
+    print_result "$INFO" "architecture" "$(uname -m)${osname:+ — $osname}"
+}
+
 # 1. Python 3.11+
 check_python() {
     if ! command -v python3 >/dev/null 2>&1; then
@@ -42,7 +51,18 @@ check_python() {
 # 2. DSD-FME
 check_dsd_fme() {
     if command -v dsd-fme >/dev/null 2>&1; then
-        print_result "$PASS" "dsd-fme" "$(command -v dsd-fme)"
+        local bin binarch
+        bin=$(command -v dsd-fme)
+        print_result "$PASS" "dsd-fme" "$bin"
+        # A dsd-fme copied from an old 32-bit Pi is "found" here but fails at
+        # runtime on a 64-bit OS with "Exec format error". Warn on mismatch.
+        if [ "$(uname -m)" = "aarch64" ] && command -v file >/dev/null 2>&1; then
+            binarch=$(file -b "$bin" 2>/dev/null)
+            if ! printf '%s' "$binarch" | grep -qi "aarch64"; then
+                print_result "$WARN" "dsd-fme arch" \
+                    "not aarch64 — may fail with Exec format error ($binarch)"
+            fi
+        fi
     else
         print_result "$FAIL" "dsd-fme" "not found"
         echo "       Build from source: https://github.com/lwvmobile/dsd-fme"
@@ -59,9 +79,8 @@ check_ffmpeg() {
         ver=$(ffmpeg -version 2>/dev/null | head -n1 | awk '{print $3}')
         print_result "$PASS" "ffmpeg" "$ver"
     else
-        print_result "$FAIL" "ffmpeg" "not found"
+        print_result "$WARN" "ffmpeg" "not found (optional — Phase 4b audio streaming, not used yet)"
         echo "       Install: sudo apt install -y ffmpeg"
-        fails=$((fails + 1))
     fi
 }
 
@@ -72,9 +91,8 @@ check_icecast() {
     elif dpkg -l icecast2 >/dev/null 2>&1; then
         print_result "$PASS" "icecast2" "installed (dpkg)"
     else
-        print_result "$FAIL" "icecast2" "not found"
+        print_result "$WARN" "icecast2" "not found (optional — Phase 4b audio streaming, not used yet)"
         echo "       Install: sudo apt install -y icecast2"
-        fails=$((fails + 1))
     fi
 }
 
@@ -109,15 +127,17 @@ check_null_sink() {
     if ! command -v pactl >/dev/null 2>&1; then
         return
     fi
-    if pactl list short modules 2>/dev/null | grep -q "dmr_capture"; then
+    if pactl list short sinks 2>/dev/null | grep -qw "dmr_capture"; then
         print_result "$PASS" "dmr_capture sink" "loaded"
     else
-        print_result "$INFO" "dmr_capture sink" "not loaded yet (Phase 2 will create it)"
+        print_result "$WARN" "dmr_capture sink" "not loaded (required for --live)"
+        echo "       Create it: bash scripts/setup-pulseaudio.sh"
     fi
 }
 
-echo "DMR Cap+ Monitor — Phase 0 environment check"
+echo "DMR Cap+ Monitor — environment check"
 echo "============================================="
+check_arch
 check_python
 check_dsd_fme
 check_ffmpeg

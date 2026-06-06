@@ -196,6 +196,14 @@ async def stream_subprocess_with_retry(
                 yield line
         except RuntimeError as exc:
             restart_reason = str(exc)
+        except OSError as exc:
+            # The child couldn't even be spawned — e.g. the binary vanished
+            # mid-run, or it's the wrong architecture ("Exec format error").
+            # Without this, a bare OSError would bubble out of the retry loop
+            # and crash the whole service with an opaque traceback. Keep the
+            # asyncio loop alive and surface a clear, throttled message so the
+            # operator can see exactly which binary failed and why.
+            restart_reason = f"could not spawn child ({exc})"
         else:
             restart_reason = "child exited (EOF)"
         if stop_event is not None and stop_event.is_set():
