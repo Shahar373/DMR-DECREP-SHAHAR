@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import sys
 import threading
 import uuid
 from collections import deque
@@ -173,25 +174,44 @@ class Evaluator:
         return False
 
     def load_rules(self) -> int:
-        """Read rules from disk. Corrupt files are renamed aside, not lost."""
-        if self.rules_path is None or not self.rules_path.exists():
+        """Read rules from disk. Corrupt files are renamed aside, not lost.
+
+        Falls back to ``rules_path.bak`` (kept by ``atomic_write_text``) if
+        the main file is missing or unparseable — covers the case where a
+        power-yank truncated the current rules file but the previous
+        version is still good on disk.
+        """
+        if self.rules_path is None:
             return 0
-        try:
-            raw = self.rules_path.read_text(encoding="utf-8")
-            data = json.loads(raw)
-            rules = _RULE_LIST_ADAPTER.validate_python(data)
-        except Exception:  # noqa: BLE001
-            # Don't crash the service over a hand-edited rules file.
+        bak_path = self.rules_path.with_suffix(self.rules_path.suffix + ".bak")
+        for candidate in (self.rules_path, bak_path):
+            if not candidate.exists() or candidate.stat().st_size == 0:
+                continue
+            try:
+                raw = candidate.read_text(encoding="utf-8")
+                data = json.loads(raw)
+                rules = _RULE_LIST_ADAPTER.validate_python(data)
+            except Exception:  # noqa: BLE001 — try next candidate or give up
+                continue
+            if candidate is bak_path:
+                print(
+                    f"# alerts: primary rules file unreadable, recovered "
+                    f"from {bak_path.name}",
+                    file=sys.stderr,
+                )
+            with self._lock:
+                self.rules = list(rules)
+            return len(rules)
+        # Neither file parsed — quarantine the main one so the operator
+        # can inspect it and we start with an empty rule set.
+        if self.rules_path.exists():
             try:
                 self.rules_path.rename(
                     self.rules_path.with_suffix(self.rules_path.suffix + ".bad")
                 )
             except OSError:
                 pass
-            return 0
-        with self._lock:
-            self.rules = list(rules)
-        return len(rules)
+        return 0
 
     def _save_rules_locked(self) -> None:
         if self.rules_path is None:
@@ -231,29 +251,36 @@ class Evaluator:
 
     def on_event(self, ev: Event) -> None:
         """Feed one event through every enabled rule."""
-        # Side caches first (so rules can join against them).
-        if ev.type == EventType.VOICE_CALL and ev.src != 0:
-            self._slot_call[ev.slot] = (ev.src, ev.tgt)
-        if ev.type in (
-            EventType.SITE_INFO, EventType.LSN_STATUS, EventType.CHANNEL_STATUS,
-        ):
-            self._last_cc_at = ev.timestamp
-            # CC came back — reset silent-run latches so they can re-fire on
-            # the next outage.
-            self._cc_silent_fired.clear()
-
         with self._lock:
+            # Side caches first (so rules can join against them).
+            # Must be inside the lock — tick() runs in a worker thread
+            # (asyncio.to_thread) and reads these caches concurrently.
+            if ev.type == EventType.VOICE_CALL and ev.src != 0:
+                self._slot_call[ev.slot] = (ev.src, ev.tgt)
+            if ev.type in (
+                EventType.SITE_INFO, EventType.LSN_STATUS, EventType.CHANNEL_STATUS,
+            ):
+                self._last_cc_at = ev.timestamp
+                # CC came back — reset silent-run latches so they can re-fire on
+                # the next outage.
+                self._cc_silent_fired.clear()
             rules = list(self.rules)
 
         for rule in rules:
             if not rule.enabled:
                 continue
-            firing = self._evaluate_event(rule, ev)
+            with self._lock:
+                firing = self._evaluate_event(rule, ev)
             if firing is not None:
                 self._record(firing)
 
     def tick(self, now: Optional[datetime] = None) -> None:
-        """Run the time-based rules (cc_silent, quality_spike)."""
+        """Run the time-based rules (cc_silent, quality_spike).
+
+        Called from a worker thread via ``asyncio.to_thread``; cache reads
+        inside ``_evaluate_tick`` are themselves lock-guarded so we can
+        release the lock during the slow ``quality_ratios_over_window``
+        query without blocking the parser path."""
         now = now or datetime.now()
         with self._lock:
             rules = list(self.rules)
@@ -308,29 +335,43 @@ class Evaluator:
 
     def _evaluate_tick(self, rule: Rule, now: datetime) -> Optional[AlertFiring]:
         if isinstance(rule, CcSilentRule):
-            if rule.id in self._cc_silent_fired:
-                return None
-            if self._last_cc_at is None:
+            # Snapshot mutable cache state under the lock; release before the
+            # arithmetic + AlertFiring construction to keep the critical
+            # section narrow.
+            with self._lock:
+                if rule.id in self._cc_silent_fired:
+                    return None
+                last_cc_at = self._last_cc_at
+            if last_cc_at is None:
                 return None  # cold start — no baseline yet
-            silent_for = (now - self._last_cc_at).total_seconds()
+            silent_for = (now - last_cc_at).total_seconds()
             if silent_for < rule.timeout_seconds:
                 return None
-            self._cc_silent_fired.add(rule.id)
+            with self._lock:
+                # Re-check after lock re-acquisition — another tick may have
+                # latched in the meantime; we don't want to fire twice.
+                if rule.id in self._cc_silent_fired:
+                    return None
+                self._cc_silent_fired.add(rule.id)
             return AlertFiring(
                 rule_id=rule.id, rule_name=rule.name, kind=rule.kind,
                 fired_at=now,
                 message=f"Control channel silent for {silent_for:.0f}s "
                         f"(threshold {rule.timeout_seconds}s)",
                 context={"silent_for_seconds": silent_for,
-                         "last_cc_at": self._last_cc_at.isoformat()},
+                         "last_cc_at": last_cc_at.isoformat()},
             )
 
         if isinstance(rule, QualitySpikeRule):
-            if not self._cooldown_ok(rule, now):
-                return None
+            with self._lock:
+                if not self._cooldown_ok(rule, now):
+                    return None
             if self._event_log is None:
                 return None
             try:
+                # quality_ratios_over_window scans the JSONL/SQLite index —
+                # potentially seconds on a big history — so we never hold the
+                # evaluator lock during it.
                 from .event_log import quality_ratios_over_window
                 qr = quality_ratios_over_window(
                     self._event_log.jsonl_path,
@@ -367,8 +408,11 @@ class Evaluator:
         return (when - last).total_seconds() >= rule.cooldown_seconds
 
     def _record(self, firing: AlertFiring) -> None:
-        self._last_fired[firing.rule_id] = firing.fired_at
         with self._lock:
+            # _last_fired feeds _cooldown_ok in both on_event (asyncio
+            # thread) and _evaluate_tick (worker thread); the write has to
+            # be under the same lock as the reads.
+            self._last_fired[firing.rule_id] = firing.fired_at
             self.firings.append(firing)
             subs = list(self.subscribers)
         payload = firing.model_dump_json()

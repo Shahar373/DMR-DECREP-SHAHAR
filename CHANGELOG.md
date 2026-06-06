@@ -9,6 +9,133 @@ Versioning follows [Semantic Versioning](https://semver.org/):
 Source of truth: `backend/__init__.py` (`__version__`). The dashboard
 footer shows the running build's version and `/api/version` exposes it.
 
+## [0.16.0] — 2026-05-20
+
+### Fixed — second stability pass: concurrency, durability, observability
+
+A second deep audit (concurrency + memory + async-I/O + crash-recovery
+domains, four parallel agents) surfaced five real bugs that this
+release closes.
+
+**Evaluator caches were unlocked between the parser thread and the
+tick worker thread (alerts.py)**
+
+`evaluator.tick()` runs via `asyncio.to_thread(...)` so it does not
+share the asyncio loop with `evaluator.on_event()`. Despite the
+docstring's "thread-safe" claim, the side caches `_slot_call`,
+`_cc_silent_fired`, `_last_cc_at`, `_last_call_key`, and `_last_fired`
+were mutated in `on_event` / `_record` outside `_lock`, while `tick →
+_evaluate_tick` read them from a different OS thread. The observable
+symptom was duplicate / missed alerts under load — `_cooldown_ok`
+could read a stale `_last_fired`, and `_cc_silent_fired` could fire
+twice for the same outage.
+
+Fix: every read and write of those caches now goes through `_lock`.
+`_evaluate_tick` snapshots `_last_cc_at` into a local before doing the
+arithmetic, and re-checks the latch under the lock before adding —
+classic double-checked locking. The slow `quality_ratios_over_window`
+JSONL/SQLite scan still happens outside the lock so a busy quality
+spike rule can't block the parser path.
+
+**JSONL writes had no fsync — power-loss could lose tens of seconds
+of events (event_log.py + cli.py)**
+
+`open(..., buffering=1)` line-buffers into the Python writer, which
+hands each newline-terminated line to the kernel. But the kernel can
+hold those pages in the page cache for ~30 s before flushing — a
+power yank in that window silently loses every event in the cache.
+
+Fix: a new `_periodic_fsync` asyncio task calls `event_log.fsync_to_disk()`
+every 5 s, which runs `os.fsync(self._fh.fileno())` on a worker thread.
+`close()` also fsyncs on graceful shutdown. Worst-case loss on a power
+yank is now bounded to a 5 s window of events instead of whatever the
+kernel happened to be holding.
+
+**Silent disk-full on event append (event_log.py)**
+
+The append path swallowed every `OSError` with `except Exception:
+pass` — "never let logging take down the pipeline". Good intent,
+terrible visibility: a full disk caused events to silently stop
+persisting while the in-memory buffer kept ticking, so a crash later
+in the day looked like a clean run with mysteriously truncated
+history.
+
+Fix: the exception handler now counts write errors and stashes the
+last error message. The first failure prints a one-shot warning to
+stderr (with diagnosis hint: "check disk space / perms"). A new
+`writer` block in `/api/health` exposes `write_errors` and
+`last_write_error` so operators / external watchdogs can alert on
+non-zero values.
+
+**alerts.json had no `.bak` fallback (alerts.py)**
+
+`atomic_write_text` already creates a `.bak` next to the new file on
+every save, but `Evaluator.load_rules` never tried it on
+corruption — it just renamed the bad file to `.bad` and started with
+zero rules. A power yank during rule persistence therefore
+permanently lost every configured alert.
+
+Fix: `load_rules` now mirrors `state.load_snapshot` — it iterates
+`(rules_path, rules_path + ".bak")` and uses the first one that parses.
+A recovery from `.bak` is logged so the operator notices.
+
+**Background tasks died silently when they raised (cli.py)**
+
+`snap_task`, `retention_task`, `event_retention_task` were created
+with `asyncio.create_task(...)` and never had their exceptions
+surfaced — an unhandled error in any of them only became visible
+when Python finally GC'd the Task, often minutes after the subsystem
+had silently stopped working. The new `fsync_task` would have had the
+same problem.
+
+Fix: a `_surface_task_exception(name)` factory generates a
+done-callback for each background task that prints
+"`name` exited with `<exc>` — this subsystem is now dead until restart"
+the instant the task crashes, so retention / snapshot / fsync
+failures are visible immediately.
+
+## [0.15.1] — 2026-05-19
+
+### Fixed — WebSocket task leak and systemd crash-loop hardening
+
+**WebSocket dead-client leak (server.py)**
+
+Both `/ws` and `/ws/alerts` used a bare `await q.get()` that blocks
+forever when a client disappears without a clean TCP FIN (network drop,
+proxy timeout, NAT eviction). The specific failure modes:
+
+* `/ws` — once a dead client's queue fills up, it is evicted from
+  `_subscribers` by `push_snapshot()`, but its asyncio task keeps
+  running, blocked on a queue that nobody will ever push to again.
+* `/ws/alerts` — alerts are infrequent so the queue rarely fills;
+  a dead client's task ran until process restart (hours).
+
+Fix: both endpoints now use `asyncio.wait_for(q.get(), timeout=30)`.
+On timeout the eviction case breaks out immediately; the alive-but-quiet
+case sends a `{"type":"_ping"}` keepalive frame and loops.  If the
+underlying socket is dead the send raises, and the task exits cleanly.
+All three frontend onmessage handlers (`index.html` ×2, `alerts.html`)
+now guard against `type === "_ping"` so no garbage is rendered.
+
+**systemd crash-loop prevention (dmr-monitor.service)**
+
+`Restart=on-failure` with no `StartLimitBurst` means a service that
+crashes on startup (wrong audio device, port already bound, etc.) can
+restart hundreds of times, filling the journal and keeping the system
+busy.  Added:
+
+* `StartLimitBurst=5` + `StartLimitIntervalSec=120s` — systemd stops
+  restarting after 5 attempts in 2 minutes and enters a failed state,
+  making the problem visible without log-spam.
+* `RestartSec=10s` (was 5 s) — gives the audio device or port a few
+  extra seconds to settle between attempts.
+* `MemoryMax=384M` — caps RSS so a slow memory leak can't OOM the Pi.
+* `StandardOutput/StandardError=journal` — logs now appear in
+  `journalctl -u dmr-monitor` for easy operator inspection.
+* Comment added warning that `--calls-dir /tmp/dmr_calls` is wiped on
+  reboot; operators who need persistent recordings should point it at
+  `/var/lib/dmr-monitor/calls` or similar.
+
 ## [0.15.0] — 2026-05-17
 
 ### Added — event retention (bounded working set, scales for the long haul)

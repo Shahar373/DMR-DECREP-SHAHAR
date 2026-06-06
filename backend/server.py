@@ -174,8 +174,14 @@ async def get_health():
         last_event_at = getattr(_state, "_last_event_at", None)
     jsonl_path = _event_log.jsonl_path if _event_log is not None else None
     db_path = None
-    if _event_log is not None and _event_log.index is not None:
-        db_path = _event_log.index.db_path
+    writer_health: Optional[dict] = None
+    if _event_log is not None:
+        if _event_log.index is not None:
+            db_path = _event_log.index.db_path
+        try:
+            writer_health = _event_log.write_health()
+        except Exception:  # noqa: BLE001 — health must never raise
+            writer_health = None
     calls_dir = _recordings.base_dir if _recordings is not None else None
     return compute_health(
         version=__version__,
@@ -187,6 +193,7 @@ async def get_health():
         db_path=db_path,
         snapshot_path=_snapshot_path,
         calls_dir=calls_dir,
+        writer_health=writer_health,
     )
 
 
@@ -513,7 +520,17 @@ async def ws_alerts(websocket: WebSocket):
         for past in _evaluator.recent_firings(limit=5)[::-1]:
             await websocket.send_text(past.model_dump_json())
         while True:
-            data = await q.get()
+            try:
+                data = await asyncio.wait_for(q.get(), timeout=30.0)
+            except asyncio.TimeoutError:
+                # Alerts are infrequent; 30 s silence is normal on a quiet
+                # channel.  Probe the socket so dead clients don't accumulate
+                # as leaked asyncio tasks.
+                try:
+                    await websocket.send_text('{"type":"_ping"}')
+                except Exception:
+                    break
+                continue
             await websocket.send_text(data)
     except WebSocketDisconnect:
         pass
@@ -537,7 +554,22 @@ async def ws_endpoint(websocket: WebSocket):
         if _state is not None:
             await websocket.send_text(_state.snapshot().model_dump_json())
         while True:
-            data = await q.get()
+            try:
+                data = await asyncio.wait_for(q.get(), timeout=30.0)
+            except asyncio.TimeoutError:
+                # If we were evicted from _subscribers (queue was full when
+                # push_snapshot tried to put_nowait), nobody will ever push to
+                # q again — break so the task doesn't leak.
+                if q not in _subscribers:
+                    break
+                # Still subscribed but channel is quiet (dsd-fme silent).
+                # Probe the socket so an undetected dead client doesn't live
+                # as a leaked asyncio task indefinitely.
+                try:
+                    await websocket.send_text('{"type":"_ping"}')
+                except Exception:
+                    break
+                continue
             await websocket.send_text(data)
     except WebSocketDisconnect:
         pass

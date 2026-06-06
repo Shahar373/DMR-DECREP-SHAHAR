@@ -12,8 +12,20 @@ ExecStart=/home/shahar/DMR-DECREP-SHAHAR/.venv/bin/python -m backend.cli \
     --port 8080 \
     --event-retention-hours 48
 Restart=on-failure
-RestartSec=5s
+RestartSec=10s
+# Prevent a crash-loop from hammering the system: allow at most 5 restarts
+# in a 2-minute window, then give up and let the operator investigate.
+StartLimitBurst=5
+StartLimitIntervalSec=120s
 Environment=PYTHONUNBUFFERED=1
+# Cap memory so a leak can't OOM the whole Pi.
+MemoryMax=384M
+# Log to the journal so journalctl -u dmr-monitor works.
+StandardOutput=journal
+StandardError=journal
+# NOTE: /tmp/dmr_calls is cleaned on reboot (tmpfs / systemd-tmpfiles).
+# Change --calls-dir to a persistent path such as /var/lib/dmr-monitor/calls
+# if recording loss across reboots is unacceptable for your deployment.
 
 [Install]
 WantedBy=default.target

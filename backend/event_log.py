@@ -18,6 +18,7 @@ from __future__ import annotations
 import csv
 import io
 import json
+import os
 import sys
 import threading
 from collections import Counter, deque
@@ -211,6 +212,11 @@ class EventLog:
         self._fh: Optional[io.TextIOBase] = None
         self._index: Optional[EventIndex] = None
         self._index_failed_once = False
+        # Counters surfaced via /api/health so a silent write failure
+        # (disk full, NFS hiccup) is visible to the operator instead of
+        # vanishing into the noqa: BLE001 swallow below.
+        self._write_errors = 0
+        self._last_write_error: Optional[str] = None
         if jsonl_path is not None:
             jsonl_path.parent.mkdir(parents=True, exist_ok=True)
             # Line-buffered append; survives crashes line-by-line.
@@ -268,6 +274,13 @@ class EventLog:
             if self._fh is not None:
                 try:
                     self._fh.flush()
+                    try:
+                        os.fsync(self._fh.fileno())
+                    except OSError:
+                        # fsync can fail on pipes / unusual fds — flush()
+                        # is the best we can do then. Don't take the
+                        # service down over it.
+                        pass
                     self._fh.close()
                 finally:
                     self._fh = None
@@ -276,6 +289,35 @@ class EventLog:
                     self._index.close()
                 finally:
                     self._index = None
+
+    def fsync_to_disk(self) -> bool:
+        """Force the JSONL writer's kernel buffer to disk.
+
+        Called from a periodic asyncio task so a power-yank loses at most
+        a bounded window of recent events (default 5 s) instead of
+        whatever the kernel had been holding back.  Returns True on
+        success, False if there is no open file handle or the syscall
+        failed.
+        """
+        with self._lock:
+            if self._fh is None:
+                return False
+            try:
+                self._fh.flush()
+                os.fsync(self._fh.fileno())
+                return True
+            except OSError as exc:
+                self._write_errors += 1
+                self._last_write_error = f"fsync: {type(exc).__name__}: {exc}"
+                return False
+
+    def write_health(self) -> dict:
+        """Snapshot of writer-side health counters for /api/health."""
+        with self._lock:
+            return {
+                "write_errors": self._write_errors,
+                "last_write_error": self._last_write_error,
+            }
 
     @property
     def index(self) -> Optional[EventIndex]:
@@ -425,8 +467,19 @@ class EventLog:
             if self._fh is not None:
                 try:
                     self._fh.write(ev.model_dump_json() + "\n")
-                except Exception:  # noqa: BLE001
-                    pass  # never let logging take down the pipeline
+                except Exception as exc:  # noqa: BLE001
+                    # Never let logging take down the live pipeline, but
+                    # don't lose the failure either — count it and stash
+                    # the last error so /api/health can surface it.
+                    self._write_errors += 1
+                    self._last_write_error = f"{type(exc).__name__}: {exc}"
+                    if self._write_errors == 1:
+                        print(
+                            f"# event-log: append failed ({exc}); "
+                            "events still queued in memory but JSONL is "
+                            "not persisting — check disk space / perms",
+                            file=sys.stderr,
+                        )
             if self._index is not None:
                 try:
                     self._index.append(ev.model_dump(mode="json"))
