@@ -203,6 +203,14 @@ class StateManager:
         elif et == EventType.QUALITY:
             self._on_quality(event)
 
+    def reset(self) -> None:
+        """Discard all accumulated state: radios, active calls, counters."""
+        self.radios.clear()
+        self.active_calls.clear()
+        self.system = SystemStatus()
+        self.quality = QualityCounters()
+        self._last_event_at = None
+
     def tick(self, now: datetime) -> None:
         """Manually expire idle calls — useful when no events are flowing."""
         self._expire_idle_calls(now)

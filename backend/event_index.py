@@ -396,6 +396,15 @@ class EventIndex:
                 except sqlite3.Error:
                     pass
 
+    def clear(self) -> None:
+        """Delete every row from the events table."""
+        with self._lock:
+            if self._closed:
+                return
+            self._commit_locked()
+            self._conn.execute("DELETE FROM events")
+            self._conn.commit()
+
     # --- retention ---
 
     def prune_older_than(

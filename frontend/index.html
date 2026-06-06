@@ -391,6 +391,7 @@ tr.has-gps { cursor: pointer; }
     </select>
   </div>
   <button id="export-csv" class="header-ctrl" title="Download all buffered events as CSV">⤓ Export CSV</button>
+  <button id="reset-data" class="header-ctrl" title="Clear all accumulated data and start fresh" style="color:#f66">↺ Reset</button>
   <div id="conn" class="wait">Connecting…</div>
 </div>
 
@@ -943,6 +944,18 @@ staleSel.addEventListener('change', () => {
 document.getElementById('export-csv').addEventListener('click', () => {
   // Plain navigation triggers the browser's download for attachment responses.
   window.location.href = '/api/events.csv';
+});
+
+// ── Reset button ───────────────────────────────────────────────────
+document.getElementById('reset-data').addEventListener('click', async () => {
+  if (!confirm('Clear all accumulated data? This cannot be undone.')) return;
+  try {
+    const r = await fetch('/api/reset', { method: 'POST' });
+    if (r.ok) location.reload();
+    else alert('Reset failed: ' + r.statusText);
+  } catch (e) {
+    alert('Reset error: ' + e.message);
+  }
 });
 
 // ── Session uptime clock ───────────────────────────────────────────
