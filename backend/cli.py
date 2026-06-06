@@ -362,6 +362,26 @@ async def _run(args: argparse.Namespace) -> None:
     from . import __build_date__, __version__
     print(f"# dmr-monitor v{__version__} (build {__build_date__})", file=sys.stderr)
 
+    # Fail fast with a clear, actionable message if live mode is requested
+    # but dsd-fme isn't installed. Otherwise the first spawn raises a bare
+    # FileNotFoundError that systemd just restart-loops on — opaque to the
+    # operator setting up a fresh Pi who simply hasn't built dsd-fme yet.
+    # (A wrong-architecture binary still passes this check but is caught at
+    # spawn time by the OSError guard in stream_subprocess_with_retry.)
+    if args.live:
+        import shutil
+        if shutil.which(args.dsd_bin) is None:
+            print(
+                f"# FATAL: dsd-fme binary {args.dsd_bin!r} not found on PATH.\n"
+                f"#   Live mode needs dsd-fme. Install system deps with\n"
+                f"#   'bash scripts/install-deps.sh', then build dsd-fme (see the\n"
+                f"#   hints in 'bash scripts/check_env.sh'), or pass\n"
+                f"#   --dsd-bin /path/to/dsd-fme. To run with no RF hardware at\n"
+                f"#   all, replay a captured log instead: --replay <logfile>.",
+                file=sys.stderr,
+            )
+            raise SystemExit(2)
+
     stop_event = asyncio.Event()
 
     calls_dir = Path(args.calls_dir)

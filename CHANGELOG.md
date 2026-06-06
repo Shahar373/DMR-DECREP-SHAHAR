@@ -9,6 +9,55 @@ Versioning follows [Semantic Versioning](https://semver.org/):
 Source of truth: `backend/__init__.py` (`__version__`). The dashboard
 footer shows the running build's version and `/api/version` exposes it.
 
+## [0.17.0] — 2026-06-06
+
+Fresh-Raspberry-Pi install hardening — a full audit (Python packaging, ARM
+wheel availability, system deps, runtime robustness, docs) of what it takes
+to bring the monitor up cleanly on a brand-new Pi.
+
+### Added
+
+- **`scripts/install-deps.sh`** — one-shot apt installer for every system
+  dependency on a fresh 64-bit Raspberry Pi OS (Bookworm): the Python
+  toolchain, the full dsd-fme build-dependency set, `pulseaudio-utils`
+  (`pactl`, daemon-agnostic — works with the PipeWire-pulse shim that ships
+  on Bookworm), and the optional Phase 4b packages (ffmpeg, icecast2).
+  Idempotent; dsd-fme itself stays a documented source build.
+- **`scripts/setup-pulseaudio.sh`** — creates the `dmr_capture` null sink
+  that `--input pulse:dmr_capture.monitor` depends on, verifies the
+  `.monitor` source, and installs a `systemd --user` oneshot so the sink is
+  recreated on every boot. Closes the classic "the sink existed on the old
+  Pi but not the new one" failure.
+
+### Fixed
+
+- **Cryptic crash when dsd-fme is missing or the wrong architecture.**
+  `--live` now preflights `shutil.which(--dsd-bin)` and exits with a clear,
+  actionable message instead of letting a bare `FileNotFoundError` bubble up
+  and systemd restart-loop on it. `stream_subprocess_with_retry` also now
+  catches `OSError` (e.g. an armv7 dsd-fme on a 64-bit Pi → "Exec format
+  error") and surfaces a throttled, readable reason rather than taking the
+  whole service down.
+- **README drift that broke a literal fresh install:** removed the
+  non-existent `git pull origin claude/dmr-monitoring-dashboard-00IUG`
+  branch step (replaced with a real clone-from-`main` flow), removed the
+  `--audio-out` flag that no longer exists in the CLI, and rewrote the
+  install section around the new scripts.
+
+### Changed
+
+- **README** — status table now reflects reality (Phase 4a dashboard/WS UI
+  is `done`, not "next"); the CLI-options list is synced to the actual
+  argparse flags (`--serve`, `--port`, `--calls-dir`, `--event-retention-hours`,
+  `--rebuild-index`, …); the Layout section lists the real module/test/script
+  set.
+- **`scripts/check_env.sh`** — reports CPU architecture, warns when a found
+  dsd-fme binary isn't aarch64 on a 64-bit OS, points the `dmr_capture` sink
+  check at `setup-pulseaudio.sh`, and downgrades ffmpeg/icecast2 from FAIL to
+  WARN (they're optional Phase 4b deps the current code never invokes).
+- **`.gitignore`** — ignore `snapshot.json*` (the atomic writer's `.bak`
+  sidecar) so runtime artifacts stop showing up as untracked.
+
 ## [0.16.2] — 2026-06-06
 
 ### Fixed
