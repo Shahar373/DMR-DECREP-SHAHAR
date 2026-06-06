@@ -9,6 +9,24 @@ Versioning follows [Semantic Versioning](https://semver.org/):
 Source of truth: `backend/__init__.py` (`__version__`). The dashboard
 footer shows the running build's version and `/api/version` exposes it.
 
+## [0.16.2] — 2026-06-06
+
+### Fixed
+
+- **Missing `httpx` dependency** — `requirements.txt` did not list `httpx`,
+  which `fastapi.testclient.TestClient` (via Starlette) needs as its test
+  transport. On a fresh install (e.g. a new Raspberry Pi) the five
+  server/API test modules — `test_alerts`, `test_health`, `test_network`,
+  `test_radio_dossier`, `test_server_events` — failed to even collect with
+  `RuntimeError: The starlette.testclient module requires the httpx
+  package to be installed`. Added `httpx>=0.27,<1` so a clean
+  `pip install -r requirements.txt` makes the whole suite runnable.
+
+### Changed
+
+- README: corrected the post-install test-count hint from `60/60` to the
+  current `177/177` so a fresh checkout knows what a green run looks like.
+
 ## [0.16.1] — 2026-06-05
 
 ### Added
