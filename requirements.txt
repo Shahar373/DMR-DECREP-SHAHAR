@@ -2,3 +2,6 @@ pydantic>=2.6,<3
 pytest>=8.0,<9
 fastapi>=0.111,<1
 uvicorn[standard]>=0.29,<1
+# Required by fastapi.testclient.TestClient (starlette uses httpx as its
+# test transport). Without it the server/API tests fail to even collect.
+httpx>=0.27,<1

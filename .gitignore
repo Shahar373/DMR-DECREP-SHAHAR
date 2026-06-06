@@ -27,3 +27,6 @@ build/
 *.ogg
 /tmp/
 snapshot.json
+# Runtime data artifacts (regenerated on every run)
+events.db
+events.jsonl

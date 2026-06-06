@@ -29,7 +29,7 @@ cd ~/DMR-DECREP-SHAHAR
 git pull origin claude/dmr-monitoring-dashboard-00IUG
 python3 -m venv .venv
 .venv/bin/pip install -r requirements.txt
-.venv/bin/pytest tests/        # 60/60 should pass
+.venv/bin/pytest tests/        # 177/177 should pass
 ```
 
 To update later just `git pull && .venv/bin/pip install -r requirements.txt`.
