@@ -5,30 +5,26 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>DMR Cap+ — Statistics</title>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+<link rel="stylesheet" href="/assets/style.css">
+<script src="/assets/shared.js" defer></script>
 <style>
 * { box-sizing: border-box; margin: 0; padding: 0; }
-:root {
-  --bg: #0d1117; --bg2: #161b22; --bg3: #21262d; --border: #30363d;
-  --text: #e6edf3; --muted: #8b949e;
-  --green: #3fb950; --blue: #58a6ff; --yellow: #d29922;
-  --red: #f85149; --purple: #bc8cff;
-}
+/* Tokens (--bg, --blue, ...) come from /assets/style.css. */
 body { font-family: ui-monospace, 'Cascadia Code', monospace;
        background: var(--bg); color: var(--text); font-size: 13px;
        min-height: 100vh; }
 header {
   background: var(--bg2); border-bottom: 1px solid var(--border);
   padding: 10px 16px; display: flex; align-items: center; gap: 16px;
+  flex-wrap: wrap;
 }
 header h1 { font-size: 14px; font-weight: 700; color: var(--blue); }
-header .nav a {
-  color: var(--muted); text-decoration: none; margin-right: 12px; font-size: 12px;
-}
-header .nav a:hover, header .nav a.active { color: var(--blue); }
 header .meta { margin-left: auto; color: var(--muted); font-size: 11px; }
 header .meta span { color: var(--text); }
+/* min(420px, 100%) instead of a hard 420px so panels shrink to the
+ * viewport on phones instead of forcing horizontal scroll. */
 main { padding: 16px; display: grid; gap: 16px;
-       grid-template-columns: repeat(auto-fit, minmax(420px, 1fr)); }
+       grid-template-columns: repeat(auto-fit, minmax(min(420px, 100%), 1fr)); }
 .card {
   background: var(--bg2); border: 1px solid var(--border); border-radius: 6px;
   padding: 12px 14px; display: flex; flex-direction: column;
@@ -50,8 +46,9 @@ main { padding: 16px; display: grid; gap: 16px;
 .kv-row .v { color: var(--text); font-weight: 600; }
 .empty { color: var(--muted); text-align: center; padding: 30px; }
 
-/* Quality Analyzer — visually prominent so RF tuning is at-a-glance. */
-.card.quality { grid-column: span 2; }
+/* Quality Analyzer — visually prominent so RF tuning is at-a-glance.
+ * 1 / -1 (not span 2) so it never overflows a single-column layout. */
+.card.quality { grid-column: 1 / -1; }
 .q-headline {
   display: flex; align-items: center; gap: 16px; margin-bottom: 12px;
   flex-wrap: wrap;
@@ -93,17 +90,11 @@ main { padding: 16px; display: grid; gap: 16px;
 .q-meta { color: var(--muted); font-size: 10px; }
 </style>
 </head>
-<body>
+<body class="page-stats">
 
 <header>
   <h1>DMR Cap+ Statistics</h1>
-  <nav class="nav">
-    <a href="/">Live</a>
-    <a href="/debrief">Debrief</a>
-    <a href="/stats" class="active">Stats</a>
-    <a href="/network">Network</a>
-    <a href="/alerts">Alerts</a>
-  </nav>
+  <nav class="nav" data-shared-nav></nav>
   <div class="meta">
     Window: <span id="m-window">—</span> events ·
     First: <span id="m-first">—</span> ·
@@ -379,11 +370,7 @@ async function refresh() {
   );
 }
 
-fetch('/api/version').then(r => r.json()).then(v => {
-  if (v && v.version) {
-    document.getElementById('m-version').textContent = `v${v.version}`;
-  }
-}).catch(() => {});
+// Version tag comes from /assets/shared.js.
 
 refresh();
 setInterval(refresh, 5000);

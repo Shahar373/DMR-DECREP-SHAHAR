@@ -9,6 +9,47 @@ Versioning follows [Semantic Versioning](https://semver.org/):
 Source of truth: `backend/__init__.py` (`__version__`). The dashboard
 footer shows the running build's version and `/api/version` exposes it.
 
+## [0.21.0] — 2026-07-11
+
+Responsive frontend foundation — the five dashboard pages now adapt to
+phone / tablet / desktop instead of being desktop-only, on a shared
+design-token + component layer.
+
+### Added
+
+- **`frontend/assets/style.css`** — shared design tokens (the dark
+  palette, a rem type scale, spacing) and components (nav, buttons,
+  hamburger) extracted from the 5× copy-pasted per-page `<style>` blocks,
+  plus per-page responsive overrides at three breakpoints (<640px,
+  640–1023px, ≥1024px). `@media (pointer: coarse)` enforces ≥44px touch
+  targets.
+- **`frontend/assets/shared.js`** — the site nav is now injected from one
+  place (`data-shared-nav` placeholder on every page, active link derived
+  from the pathname, hamburger below 640px) and `/api/version` is fetched
+  once for the version tag instead of per-page copies.
+- Live header shows **"sent/total" radios** when the broadcast snapshot
+  is trimmed, with the archived count in the tooltip.
+
+### Changed
+
+- **Phones get real layouts**: the live dashboard's fixed
+  `100vh/overflow:hidden` two-column shell becomes a single scrolling
+  column (map 45dvh on top, then calls/history/debrief, radios table with
+  its own horizontal scroll); Debrief's 7-column table renders as labeled
+  cards; Stats/Alerts grids collapse (min(420px,100%) minimums); Network
+  stacks the graph above the edge list with dvh sizing.
+- **Radios table renders incrementally** — rows are keyed by radio id and
+  only re-render when their content signature changes; DOM order is
+  touched only when the sort order changes. Previously the whole tbody
+  was rebuilt via innerHTML on every WS frame plus an O(rows)
+  querySelectorAll pass injecting Dossier buttons (now built into the row
+  template).
+- Cytoscape skips the expensive cose re-layout when the graph topology is
+  unchanged between refreshes (weights update in place) — the biggest
+  mobile CPU win on the Network page.
+- Debrief page-size options aligned with the server clamp
+  (100/500/1000/2000, default 500).
+
 ## [0.20.0] — 2026-07-11
 
 Day-partitioned data layer — collected data is now organised by local

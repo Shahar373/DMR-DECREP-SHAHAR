@@ -1,0 +1,237 @@
+/* DMR Cap+ Monitor — shared design tokens + components (v0.21.0)
+ *
+ * Loaded by every page AFTER its own <style> block, so the rules here
+ * (tokens, shared header/nav, buttons, responsive overrides) win where
+ * they overlap the legacy per-page CSS. Pages are tagged with a body
+ * class (page-live / page-debrief / page-stats / page-network /
+ * page-alerts) for scoped responsive overrides.
+ *
+ * Breakpoints (mobile-first thinking, desktop-first legacy CSS):
+ *   phone   <640px
+ *   tablet  640–1023px
+ *   desktop >=1024px
+ */
+
+:root {
+  /* Color tokens — the historical dark palette, named semantically. */
+  --bg: #0d1117;
+  --bg2: #161b22;
+  --bg3: #21262d;
+  --border: #30363d;
+  --text: #e6edf3;
+  --muted: #8b949e;
+  --green: #3fb950;
+  --blue: #58a6ff;
+  --yellow: #d29922;
+  --red: #f85149;
+  --purple: #bc8cff;
+  --orange: #f0883e;
+
+  /* Type scale (rem-based so user font-size prefs apply). The legacy
+   * pages used fixed 10–13px; these tokens replace them gradually. */
+  --fs-xs: 0.6875rem;   /* 11px */
+  --fs-sm: 0.75rem;     /* 12px */
+  --fs-md: 0.8125rem;   /* 13px */
+  --fs-lg: 1rem;        /* 16px */
+
+  /* Spacing scale */
+  --sp-1: 4px;
+  --sp-2: 8px;
+  --sp-3: 12px;
+  --sp-4: 16px;
+}
+
+/* ── Shared nav (populated by shared.js into [data-shared-nav]) ────── */
+
+.nav a {
+  color: var(--muted);
+  text-decoration: none;
+  margin-right: 12px;
+  font-size: var(--fs-sm);
+  display: inline-block;
+  padding: 4px 2px;
+}
+.nav a:hover, .nav a.active { color: var(--blue); }
+
+/* Hamburger toggle — hidden on wide screens. */
+.nav-toggle {
+  display: none;
+  background: var(--bg3);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  font-family: inherit;
+  font-size: var(--fs-md);
+  padding: 4px 10px;
+  cursor: pointer;
+}
+
+@media (max-width: 639px) {
+  .nav-toggle { display: inline-block; }
+  nav.nav {
+    display: none;
+    position: absolute;
+    top: 100%;
+    left: 0;
+    right: 0;
+    background: var(--bg2);
+    border-bottom: 1px solid var(--border);
+    padding: var(--sp-2) var(--sp-4);
+    z-index: 300;
+  }
+  nav.nav.open { display: block; }
+  nav.nav a {
+    display: block;
+    padding: 10px 4px;
+    font-size: var(--fs-md);
+    border-bottom: 1px solid var(--border);
+  }
+  nav.nav a:last-child { border-bottom: none; }
+  header { position: relative; }
+}
+
+/* ── Touch targets ─────────────────────────────────────────────────── */
+
+@media (pointer: coarse) {
+  .btn, button, select, input[type="datetime-local"], input[type="number"] {
+    min-height: 44px;
+  }
+  .nav a { min-height: 44px; display: inline-flex; align-items: center; }
+  th { padding-top: 10px; padding-bottom: 10px; }
+}
+
+/* ── Generic responsive helpers ────────────────────────────────────── */
+
+.table-scroll { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+
+img, canvas, svg, video { max-width: 100%; }
+
+/* ── Page: Debrief ─────────────────────────────────────────────────── */
+
+@media (max-width: 639px) {
+  body.page-debrief { height: auto; overflow: auto; }
+  body.page-debrief #table-wrap { overflow: visible; }
+
+  /* Card view: each row becomes a block with ::before labels. */
+  body.page-debrief table, body.page-debrief tbody,
+  body.page-debrief tr, body.page-debrief td { display: block; }
+  body.page-debrief thead { display: none; }
+  body.page-debrief tr {
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    margin: var(--sp-2) var(--sp-3);
+    padding: var(--sp-2);
+    background: var(--bg2);
+  }
+  body.page-debrief td {
+    border: none;
+    padding: 3px 6px;
+    white-space: normal;
+    word-break: break-word;
+    font-size: var(--fs-sm);
+  }
+  body.page-debrief td[data-label]::before {
+    content: attr(data-label) ": ";
+    color: var(--muted);
+    font-size: var(--fs-xs);
+    text-transform: uppercase;
+    letter-spacing: .05em;
+  }
+  body.page-debrief td[data-label=""]::before { content: ""; }
+  body.page-debrief .t-raw { max-width: none; }
+  body.page-debrief #filters { padding: var(--sp-2) var(--sp-3); }
+  body.page-debrief .f-actions { margin-left: 0; width: 100%; }
+  body.page-debrief .f-actions .btn { flex: 1; }
+}
+
+/* ── Page: Stats ───────────────────────────────────────────────────── */
+
+/* The panel grid minimum used to be a hard 420px → horizontal overflow
+ * on phones. min(420px, 100%) keeps desktop identical and lets panels
+ * shrink to the viewport on narrow screens. */
+body.page-stats main {
+  grid-template-columns: repeat(auto-fit, minmax(min(420px, 100%), 1fr));
+}
+@media (max-width: 639px) {
+  body.page-stats .card { min-width: 0; overflow-x: auto; }
+}
+
+/* ── Page: Network ─────────────────────────────────────────────────── */
+
+@media (max-width: 1023px) {
+  body.page-network { height: auto; overflow: auto; }
+  body.page-network #layout {
+    display: flex;
+    flex-direction: column;
+    height: auto;
+  }
+  body.page-network #cy { height: min(70dvh, 520px); }
+  body.page-network #sidepane {
+    width: auto;
+    max-height: 40dvh;
+    border-left: none;
+    border-top: 1px solid var(--border);
+  }
+}
+@media (max-width: 639px) {
+  body.page-network .toolbar { gap: var(--sp-2); }
+  body.page-network .legend { margin-left: 0; }
+}
+
+/* ── Page: Alerts ──────────────────────────────────────────────────── */
+
+@media (max-width: 1023px) {
+  body.page-alerts { height: auto; overflow: auto; }
+  body.page-alerts #main { display: flex; flex-direction: column; height: auto; }
+}
+@media (max-width: 639px) {
+  body.page-alerts table { font-size: var(--fs-xs); }
+  body.page-alerts #main > section { overflow-x: auto; }
+}
+
+/* ── Page: Live dashboard (index.html) ─────────────────────────────── */
+
+@media (max-width: 1023px) {
+  /* The live header carries ~12 nowrap items — let it wrap below
+   * desktop width instead of pushing the page sideways. */
+  body.page-live #header { flex-wrap: wrap; row-gap: var(--sp-2); }
+  body.page-live #footer { flex-wrap: wrap; row-gap: 4px; }
+}
+
+@media (max-width: 1023px) and (min-width: 640px) {
+  /* Tablet: narrower sidebar, dossier fits the viewport. */
+  body.page-live #main { grid-template-columns: minmax(240px, 1fr) 2fr; }
+  body.page-live .dossier-panel { width: min(440px, 100%); }
+}
+
+@media (max-width: 639px) {
+  /* Phone: unlock the fixed viewport shell — single scrolling column. */
+  body.page-live { height: auto; overflow: auto; }
+  body.page-live #main {
+    display: flex;
+    flex-direction: column;
+    height: auto;
+    overflow: visible;
+  }
+  body.page-live #calls-panel {
+    overflow: visible;
+    height: auto;
+    border-right: none;
+    order: 2;  /* map first, then calls/history/debrief, then radios */
+  }
+  body.page-live #map-wrap { order: 1; height: 45dvh; min-height: 240px; }
+  body.page-live #radios-wrap { order: 3; }
+  /* Inner live lists get their own bounded scroll areas so the page
+   * column doesn't grow unbounded. */
+  body.page-live #history-section,
+  body.page-live #debrief-section { flex: none; }
+  body.page-live #history-list,
+  body.page-live #debrief-list { max-height: 40dvh; }
+  body.page-live .dossier-panel { width: 100%; }
+  body.page-live #header { flex-wrap: wrap; row-gap: var(--sp-2); }
+  body.page-live #footer { flex-wrap: wrap; row-gap: 4px; }
+  /* Radios table scrolls sideways inside its own container instead of
+   * overflowing the page. */
+  body.page-live #radios-wrap { overflow-x: auto; max-height: 60dvh; }
+  body.page-live #toast-bar { max-width: calc(100vw - 28px); }
+}

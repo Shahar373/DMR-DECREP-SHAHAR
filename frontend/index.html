@@ -6,21 +6,11 @@
 <title>DMR Cap+ Monitor</title>
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<link rel="stylesheet" href="/assets/style.css">
+<script src="/assets/shared.js" defer></script>
 <style>
 * { box-sizing: border-box; margin: 0; padding: 0; }
-:root {
-  --bg:      #0d1117;
-  --bg2:     #161b22;
-  --bg3:     #21262d;
-  --border:  #30363d;
-  --text:    #e6edf3;
-  --muted:   #8b949e;
-  --green:   #3fb950;
-  --blue:    #58a6ff;
-  --yellow:  #d29922;
-  --red:     #f85149;
-  --purple:  #bc8cff;
-}
+/* Tokens (--bg, --blue, ...) come from /assets/style.css. */
 body { font-family: ui-monospace, 'Cascadia Code', monospace;
        background: var(--bg); color: var(--text); font-size: 13px; height: 100vh;
        display: flex; flex-direction: column; overflow: hidden; }
@@ -353,6 +343,14 @@ tr.has-gps { cursor: pointer; }
 }
 .toast .t-x:hover { color: var(--red); }
 
+/* Dossier button inside each radio row (built by renderRadios). */
+.d-btn {
+  margin-left: 6px; padding: 0 5px; font: inherit; font-size: 10px;
+  background: var(--bg3); color: var(--blue);
+  border: 1px solid var(--border); border-radius: 3px; cursor: pointer;
+}
+.d-btn:hover { border-color: var(--blue); }
+
 /* ── Keyboard-focus ring + reduced motion ──────────────────────── */
 :focus-visible {
   outline: 2px solid var(--yellow);
@@ -364,18 +362,12 @@ tr.has-gps { cursor: pointer; }
 }
 </style>
 </head>
-<body>
+<body class="page-live">
 
 <!-- Header -->
-<div id="header">
+<header id="header">
   <h1>DMR Cap+ Monitor</h1>
-  <nav style="display:flex;gap:10px;font-size:11px">
-    <a href="/" style="color:var(--blue);text-decoration:none">Live</a>
-    <a href="/debrief" style="color:var(--muted);text-decoration:none">Debrief</a>
-    <a href="/stats" style="color:var(--muted);text-decoration:none">Stats</a>
-    <a href="/network" style="color:var(--muted);text-decoration:none">Network</a>
-    <a href="/alerts" style="color:var(--muted);text-decoration:none">Alerts</a>
-  </nav>
+  <nav class="nav" data-shared-nav></nav>
   <div class="hitem">Site: <span id="h-site">—</span></div>
   <div class="hitem">Rest LSN: <span id="h-rest">—</span></div>
   <div class="hitem">Radios: <span id="h-radios">0</span></div>
@@ -393,7 +385,7 @@ tr.has-gps { cursor: pointer; }
   <button id="export-csv" class="header-ctrl" title="Download all buffered events as CSV">⤓ Export CSV</button>
   <button id="reset-data" class="header-ctrl" title="Clear all accumulated data and start fresh" style="color:#f66">↺ Reset</button>
   <div id="conn" class="wait">Connecting…</div>
-</div>
+</header>
 
 <!-- LSN channel bar -->
 <div id="lsn-bar"></div>
@@ -683,6 +675,48 @@ function renderCalls(snap) {
   });
 }
 
+// Keyed incremental table updates. The old implementation cleared
+// tbody.innerHTML and rebuilt every row on EVERY snapshot frame (plus an
+// O(rows) querySelectorAll pass injecting Dossier buttons) — continuous
+// layout thrash that janked badly on phones. Rows are now cached per
+// radio id and only re-rendered when their content signature changes;
+// DOM order is only touched when the sort order actually changed.
+const _radioRows = new Map();  // radio_id → { tr, sig }
+
+function _radioRowSig(r, isActive, isSelected) {
+  return [r.last_seen, r.voice_frame_count, r.last_tg, r.last_slot,
+          r.last_call_was_encrypted, !!r.last_position, r.ip,
+          isActive, isSelected].join('|');
+}
+
+function _fillRadioRow(tr, r, isActive, isSelected) {
+  const hasGps = !!r.last_position;
+  tr.className = '';
+  if (isActive)   tr.classList.add('active-row');
+  if (isSelected) tr.classList.add('selected-row');
+  if (hasGps) tr.classList.add('has-gps');
+  tr.onclick = hasGps ? () => selectRadio(r.id) : null;
+  const gps = hasGps
+    ? `<span class="badge badge-pos">GPS</span>`
+    : `<span class="badge badge-no">—</span>`;
+  const enc = r.last_call_was_encrypted
+    ? `<span class="badge badge-enc">ENC</span>`
+    : `<span class="muted">—</span>`;
+  tr.innerHTML = `
+    <td><strong>${r.id}</strong>${isActive ? ' <span style="color:var(--green)">●</span>' : ''}<button class="d-btn" title="Open Dossier">D</button></td>
+    <td>${fmt(r.last_seen)}</td>
+    <td>${r.voice_frame_count}</td>
+    <td>${r.last_tg ?? '<span class="muted">—</span>'}</td>
+    <td>${r.last_slot ?? '<span class="muted">—</span>'}</td>
+    <td>${enc}</td>
+    <td>${gps}</td>
+    <td class="muted">${r.ip ?? '—'}</td>`;
+  tr.querySelector('.d-btn').onclick = e => {
+    e.stopPropagation();
+    openDossier(r.id);
+  };
+}
+
 function renderRadios(snap) {
   const activeIds = new Set(Object.values(snap.active_calls).map(c => c.src));
   const refTime = snap.generated_at ? new Date(snap.generated_at).getTime() : Date.now();
@@ -709,35 +743,38 @@ function renderRadios(snap) {
   });
 
   const tbody = document.getElementById('radio-tbody');
-  tbody.innerHTML = '';
+  const seen = new Set();
   rows.forEach(r => {
+    seen.add(r.id);
     const isActive = activeIds.has(r.id);
     const isSelected = r.id === selectedRadioId;
-    const hasGps = !!r.last_position;
-    const tr = document.createElement('tr');
-    if (isActive)   tr.classList.add('active-row');
-    if (isSelected) tr.classList.add('selected-row');
-    if (hasGps) {
-      tr.classList.add('has-gps');
-      tr.onclick = () => selectRadio(r.id);
+    const sig = _radioRowSig(r, isActive, isSelected);
+    let entry = _radioRows.get(r.id);
+    if (!entry) {
+      entry = { tr: document.createElement('tr'), sig: null };
+      _radioRows.set(r.id, entry);
     }
-    const gps = r.last_position
-      ? `<span class="badge badge-pos">GPS</span>`
-      : `<span class="badge badge-no">—</span>`;
-    const enc = r.last_call_was_encrypted
-      ? `<span class="badge badge-enc">ENC</span>`
-      : `<span class="muted">—</span>`;
-    tr.innerHTML = `
-      <td><strong>${r.id}</strong>${isActive ? ' <span style="color:var(--green)">●</span>' : ''}</td>
-      <td>${fmt(r.last_seen)}</td>
-      <td>${r.voice_frame_count}</td>
-      <td>${r.last_tg ?? '<span class="muted">—</span>'}</td>
-      <td>${r.last_slot ?? '<span class="muted">—</span>'}</td>
-      <td>${enc}</td>
-      <td>${gps}</td>
-      <td class="muted">${r.ip ?? '—'}</td>`;
-    tbody.appendChild(tr);
+    if (entry.sig !== sig) {
+      entry.sig = sig;
+      _fillRadioRow(entry.tr, r, isActive, isSelected);
+    }
   });
+  for (const [id, entry] of _radioRows) {
+    if (!seen.has(id)) {
+      entry.tr.remove();
+      _radioRows.delete(id);
+    }
+  }
+  // Reorder only when the visible order actually changed — appendChild
+  // MOVES an attached node, so this pass is cheap and idempotent.
+  const desired = rows.map(r => _radioRows.get(r.id).tr);
+  let inOrder = tbody.children.length === desired.length;
+  if (inOrder) {
+    for (let i = 0; i < desired.length; i++) {
+      if (tbody.children[i] !== desired[i]) { inOrder = false; break; }
+    }
+  }
+  if (!inOrder) desired.forEach(tr => tbody.appendChild(tr));
 }
 
 function renderQuality(snap) {
@@ -753,7 +790,18 @@ function renderQuality(snap) {
 function renderHeader(snap) {
   document.getElementById('h-site').textContent  = snap.system.site ?? '—';
   document.getElementById('h-rest').textContent  = snap.system.rest_lsn ?? '—';
-  document.getElementById('h-radios').textContent = Object.keys(snap.radios).length;
+  // Broadcast snapshots may be trimmed (radios_total > sent) and old
+  // radios may be archived out of live state (radios_evicted_total) —
+  // show "sent/total" so the operator knows rows were omitted, with the
+  // archived count in the tooltip (history stays queryable via Debrief).
+  const sent = Object.keys(snap.radios).length;
+  const total = snap.radios_total ?? sent;
+  const el = document.getElementById('h-radios');
+  el.textContent = total > sent ? `${sent}/${total}` : String(sent);
+  const evicted = snap.radios_evicted_total ?? 0;
+  el.title = evicted
+    ? `${evicted} radios archived from live state — history in Debrief/Dossier`
+    : '';
   document.getElementById('h-calls').textContent  = Object.keys(snap.active_calls).length;
 }
 
@@ -980,13 +1028,7 @@ setInterval(() => {
   if (_uptimeEl) _uptimeEl.textContent = _fmtUptime(Math.floor((Date.now() - _bootAt) / 1000));
 }, 1000);
 
-// ── Version tag (fetched once on load) ─────────────────────────────
-fetch('/api/version').then(r => r.ok ? r.json() : null).then(v => {
-  if (!v || !v.version) return;
-  const el = document.getElementById('version-tag');
-  el.textContent = 'v' + v.version;
-  el.title = `Build ${v.build_date}`;
-}).catch(() => {});
+// Version tag (#version-tag) is populated by /assets/shared.js.
 
 // ── Debrief panel ──────────────────────────────────────────────────
 const debriefSel = document.getElementById('debrief-filter');
@@ -1204,30 +1246,9 @@ function renderDossier(d) {
   }, 50);
 }
 
-// Hook a Dossier button into each radio row by post-processing renderRadios.
-// We attach via row right-click handler too, but the explicit button is the
-// canonical affordance.
-const _origRenderRadios = renderRadios;
-renderRadios = function(snap) {
-  _origRenderRadios(snap);
-  // Add a Dossier button to each row's first cell (idempotent).
-  document.querySelectorAll('#radio-tbody tr').forEach((tr, i) => {
-    const firstCell = tr.querySelector('td');
-    if (!firstCell || firstCell.querySelector('.d-btn')) return;
-    const idText = firstCell.querySelector('strong')?.textContent;
-    if (!idText) return;
-    const btn = document.createElement('button');
-    btn.className = 'd-btn';
-    btn.textContent = 'D';
-    btn.title = 'Open Dossier';
-    btn.style.cssText =
-      'margin-left:6px;padding:0 5px;font:inherit;font-size:10px;' +
-      'background:var(--bg3);color:var(--blue);' +
-      'border:1px solid var(--border);border-radius:3px;cursor:pointer;';
-    btn.onclick = e => { e.stopPropagation(); openDossier(parseInt(idText)); };
-    firstCell.appendChild(btn);
-  });
-};
+// (The Dossier button is built directly inside _fillRadioRow — the old
+// post-render querySelectorAll monkey-patch ran an O(rows) DOM walk on
+// every snapshot frame.)
 
 // ── Alerts toast bar ──────────────────────────────────────────────
 const _toastBar = document.getElementById('toast-bar');
