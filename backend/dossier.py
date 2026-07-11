@@ -20,6 +20,13 @@ from .network import compute_talker_pairs
 # 2-second gap reliably separates distinct keyups.
 _CALL_GAP_SECONDS = 2.0
 
+# Session grouping needs ordered voice rows; only the most recent 20
+# sessions surface in the dossier, so we bound the pull to the newest N
+# frames instead of materialising every voice row in the window (which
+# could be hundreds of thousands on a busy 24 h+ net). 5000 frames ≈ 5
+# minutes of continuous PTT — far more than 20 sessions' worth.
+_RECENT_VOICE_ROWS = 5_000
+
 
 def _group_calls(voice_rows: list[dict]) -> list[dict]:
     """Collapse a chronological run of voice_call frames into call sessions.
@@ -115,41 +122,22 @@ def build_dossier(
         if ip_rows:
             ip = ip_rows[0].get("ip")
 
-    rows_as_src = index.query(src=radio_id, since=since, limit=500_000)
-    # Also include events where this radio is the *target* (e.g. private data
-    # headers or LRRP requests addressed to it) — otherwise a radio that only
-    # appears as a recipient passes the existence check above but ends up with
-    # first_seen=None/last_seen=None/empty hourly.
-    rows_as_tgt = index.query(tgt=radio_id, since=since, limit=500_000)
+    # Recent voice frames only (newest _RECENT_VOICE_ROWS, restored to
+    # chronological order for session grouping). Previously this pulled up
+    # to 500k full payload rows per side into Python; every aggregate that
+    # used those rows now runs as a GROUP BY inside SQLite instead.
+    voice_rows = index.query(
+        src=radio_id, types=["voice_call"], since=since,
+        limit=_RECENT_VOICE_ROWS, descending=True,
+    )
+    voice_rows.reverse()
 
-    voice_rows = [r for r in rows_as_src if r.get("type") == "voice_call"]
-    voice_rows.sort(key=lambda r: r.get("timestamp", ""))
+    tg_counts = Counter(index.count_by_tgt(
+        radio_id, since=since, types=["voice_call"],
+    ))
 
-    tg_counts: Counter[int] = Counter()
-    for r in voice_rows:
-        tg = r.get("tgt")
-        if tg is not None:
-            tg_counts[tg] += 1
-
-    # Hourly histogram + lifetime bounds: union of src-side and tgt-side rows,
-    # de-duplicated by (timestamp, type) so an event isn't double-counted if
-    # the radio is both src and tgt of the same row (rare but legal).
-    seen_keys: set[tuple] = set()
-    all_radio_rows: list[dict] = []
-    for r in (*rows_as_src, *rows_as_tgt):
-        key = (r.get("timestamp"), r.get("type"), r.get("src"), r.get("tgt"))
-        if key in seen_keys:
-            continue
-        seen_keys.add(key)
-        all_radio_rows.append(r)
-
-    hourly = [0] * 24
-    for r in all_radio_rows:
-        ts_raw = r.get("timestamp", "")
-        try:
-            hourly[datetime.fromisoformat(ts_raw).hour] += 1
-        except (TypeError, ValueError):
-            continue
+    # Hourly histogram over src-side + tgt-side rows, grouped in SQL.
+    hourly = index.hourly_histogram(radio_id, since=since)
 
     # Position history.
     pos_rows = index.query(src=radio_id, types=["lrrp_position"], since=since, limit=10_000)
@@ -197,19 +185,18 @@ def build_dossier(
     co_talkers.sort(key=lambda c: c["weight"], reverse=True)
     co_talkers = co_talkers[:10]
 
-    # Lifetime bounds and totals — single passes over the in-memory list.
-    all_ts = [r.get("timestamp") for r in all_radio_rows if r.get("timestamp")]
-    first_seen = min(all_ts) if all_ts else None
-    last_seen = max(all_ts) if all_ts else None
+    # Lifetime bounds via MIN/MAX in SQL (src-side and tgt-side merged).
+    first_seen, last_seen = index.radio_bounds(radio_id, since=since)
     total_calls = len(sessions)
     # Approximate encrypted_calls: count encryption events whose slot is one
     # this radio used in the window. Not exact, but a useful signal.
     used_slots = {s["slot"] for s in sessions if s.get("slot") is not None}
     encrypted_calls = 0
     if used_slots:
-        for r in index.query(since=since, types=["encryption"], limit=500_000):
-            if r.get("slot") in used_slots:
-                encrypted_calls += 1
+        enc_by_slot = index.count_encryption_by_slot(since=since)
+        encrypted_calls = sum(
+            c for slot, c in enc_by_slot.items() if slot in used_slots
+        )
 
     return {
         "id": radio_id,
@@ -227,5 +214,9 @@ def build_dossier(
         "recent_calls": recent_calls,
         "hourly_activity": hourly,
         "window_seconds": window_seconds,
+        # Session stats (total_calls, recent_calls) are derived from the
+        # newest N voice frames, not the entire window — documented so UI
+        # and API consumers know the bound.
+        "recent_calls_window_rows": _RECENT_VOICE_ROWS,
         "generated_at": now.isoformat(),
     }

@@ -9,6 +9,38 @@ Versioning follows [Semantic Versioning](https://semver.org/):
 Source of truth: `backend/__init__.py` (`__version__`). The dashboard
 footer shows the running build's version and `/api/version` exposes it.
 
+## [0.19.0] — 2026-07-11
+
+Load hardening, part 2 of 2 — the heavy analytical endpoints now aggregate
+inside SQLite instead of materialising raw event rows in Python, and live
+state is bounded.
+
+### Changed
+
+- **`/api/network` runs as GROUP BY in SQLite.** New
+  `EventIndex.pair_counts()` / `distinct_gps_radios()` aggregates replace
+  the two up-to-500k-row pulls (~120 MB of Python dicts per call — the
+  single most likely OOM trigger on a Pi). The graph output is
+  arithmetically identical; an equivalence test pins the old row-by-row
+  logic as the oracle.
+- **Dossier (`/api/radio/{id}`) uses SQL aggregates** — `radio_bounds()`
+  (MIN/MAX), `hourly_histogram()` (UNION ALL of two indexed GROUP BYs),
+  `count_by_tgt()`, `count_encryption_by_slot()`. Call-session grouping now
+  reads only the newest 5000 voice frames (`descending=True` query) instead
+  of every voice row in the window; the bound is surfaced as
+  `recent_calls_window_rows` in the response. Known approximation: an event
+  where the radio is both src and tgt double-counts in the histogram.
+
+### Added
+
+- **`--max-radios`** (default 2000) — LRU cap on live radios by
+  `last_seen`, evicted in ~5% batches; enforced on snapshot restore too, so
+  a fat legacy `snapshot.json` can't resurrect an oversized dict. Evicted
+  radios stay fully queryable via `/api/history` and `/api/radio/{id}`;
+  additive `radios_evicted_total` snapshot field lets the UI show
+  "N archived".
+- `EventIndex.query(descending=True)` for newest-first bounded pulls.
+
 ## [0.18.0] — 2026-07-11
 
 Load hardening, part 1 of 2 — closes the biggest "dashboard freezes or

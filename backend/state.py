@@ -146,6 +146,10 @@ class DashboardSnapshot(BaseModel):
     # "N of M" so the operator knows rows were omitted for payload size.
     # Additive field (defaults for old persisted snapshots).
     radios_total: int = 0
+    # Radios evicted from live state by the --max-radios LRU cap. Their
+    # history stays queryable via /api/history and /api/radio/{id} — this
+    # counter lets the UI say "N archived". Additive field.
+    radios_evicted_total: int = 0
 
 
 # ---------------------------------------------------------------------------
@@ -162,6 +166,7 @@ class StateManager:
         on_call_end: Optional[Callable[[ActiveCall], None]] = None,
         broadcast_max_radios: int = 2000,
         broadcast_trail_max_age: timedelta = timedelta(minutes=15),
+        max_radios: int = 2000,
     ) -> None:
         self.radios: dict[int, Radio] = {}
         self.active_calls: dict[int, ActiveCall] = {}
@@ -176,6 +181,13 @@ class StateManager:
         # persisted snapshot.json always uses the full, untrimmed view.
         self._broadcast_max_radios = broadcast_max_radios
         self._broadcast_trail_max_age = broadcast_trail_max_age
+        # Hard cap on live radios. The dict used to grow with every
+        # distinct radio id ever heard (persisted across restarts via
+        # snapshot.json), which made snapshot serialisation — and thus the
+        # 1 Hz broadcast — steadily more expensive forever. LRU by
+        # last_seen; evicted radios remain fully queryable in SQLite.
+        self._max_radios = max_radios
+        self.radios_evicted_total = 0
 
     # --- public API ---
 
@@ -221,6 +233,7 @@ class StateManager:
         self.system = SystemStatus()
         self.quality = QualityCounters()
         self._last_event_at = None
+        self.radios_evicted_total = 0
 
     def tick(self, now: datetime) -> None:
         """Manually expire idle calls — useful when no events are flowing."""
@@ -269,6 +282,7 @@ class StateManager:
             quality=self.quality,
             generated_at=self._last_event_at or datetime.now(),
             radios_total=len(self.radios),
+            radios_evicted_total=self.radios_evicted_total,
         )
 
     def load_snapshot(self, path) -> bool:
@@ -299,6 +313,11 @@ class StateManager:
             self.radios = dict(snap.radios)
             self.system = snap.system
             self.quality = snap.quality
+            self.radios_evicted_total = snap.radios_evicted_total
+            # Enforce the cap on restore too — a fat legacy snapshot.json
+            # from before the LRU cap must not resurrect an oversized dict.
+            if len(self.radios) > self._max_radios:
+                self._evict_radios()
             # active_calls intentionally skipped — they expired during downtime.
             # _last_event_at is left None so the next real event sets it fresh.
             return True
@@ -319,10 +338,30 @@ class StateManager:
         if radio is None:
             radio = Radio(id=radio_id, first_seen=ts, last_seen=ts)
             self.radios[radio_id] = radio
+            if len(self.radios) > self._max_radios:
+                self._evict_radios()
         else:
             if ts > radio.last_seen:
                 radio.last_seen = ts
         return radio
+
+    def _evict_radios(self) -> None:
+        """Batch-evict the ~5% oldest radios by last_seen.
+
+        Batched so the O(n log n) sort runs once per ~5% of the cap's
+        worth of new radios, not on every single insert past the cap.
+        """
+        overshoot = len(self.radios) - self._max_radios
+        if overshoot <= 0:
+            return
+        batch = max(overshoot, self._max_radios // 20, 1)
+        batch = min(batch, len(self.radios))
+        oldest = sorted(
+            self.radios.values(), key=lambda r: r.last_seen,
+        )[:batch]
+        for radio in oldest:
+            del self.radios[radio.id]
+        self.radios_evicted_total += len(oldest)
 
     def _expire_idle_calls(self, now: datetime) -> None:
         expired = [

@@ -383,6 +383,11 @@ def _parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     p.add_argument("--alerts-rules", default="alerts.json",
                    help="path to the Alerts Engine rules file "
                         "(default: %(default)s, empty string disables)")
+    p.add_argument("--max-radios", type=int, default=2000,
+                   help="cap on live radios kept in memory; oldest by "
+                        "last_seen are evicted in batches past the cap — "
+                        "their history stays queryable via the SQLite "
+                        "index (default: %(default)s)")
     p.add_argument("--reset-token", default=None,
                    help="shared secret for POST /api/reset (sent as the "
                         "X-Reset-Token header); when unset, reset is "
@@ -444,7 +449,7 @@ async def _run(args: argparse.Namespace) -> None:
         except Exception:  # noqa: BLE001
             pass
 
-    state = StateManager()
+    state = StateManager(max_radios=args.max_radios)
     snapshot_path = Path(args.snapshot)
     if state.load_snapshot(snapshot_path):
         print(

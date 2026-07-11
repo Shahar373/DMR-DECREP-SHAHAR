@@ -273,9 +273,11 @@ class EventIndex:
         types: Optional[Iterable[str]] = None,
         limit: int = 500,
         offset: int = 0,
+        descending: bool = False,
     ) -> list[dict]:
         where, params = self._build_where(since, until, src, tgt, types)
-        sql = f"SELECT payload FROM events{where} ORDER BY ts LIMIT ? OFFSET ?"
+        order = "DESC" if descending else "ASC"
+        sql = f"SELECT payload FROM events{where} ORDER BY ts {order} LIMIT ? OFFSET ?"
         params.extend([int(limit), int(offset)])
         with self._lock:
             self._commit_locked()
@@ -348,6 +350,143 @@ class EventIndex:
             self._commit_locked()
             row = self._conn.execute(sql, params).fetchone()
         return row[0], row[1]
+
+    # --- aggregates for the network graph / dossier ---
+    # These replace what used to be "pull up to 500k payload rows into
+    # Python and Counter() over them" — the single biggest memory spike in
+    # the server (~120 MB per /api/network call on a wide window). SQLite
+    # does the grouping; Python only sees the (small) grouped result.
+
+    def pair_counts(
+        self,
+        since: Optional[datetime] = None,
+        types: Optional[Iterable[str]] = None,
+    ) -> list[tuple]:
+        """Grouped pair activity: (src, tgt, type, addressing, count, max_ts).
+
+        Cardinality is the number of distinct (src, tgt, type, addressing)
+        combinations in the window — thousands, not hundreds of thousands.
+        """
+        where, params = self._build_where(since, None, None, None, types)
+        sql = (
+            "SELECT src, tgt, type, addressing, COUNT(*), MAX(ts) "
+            f"FROM events{where} GROUP BY src, tgt, type, addressing"
+        )
+        with self._lock:
+            self._commit_locked()
+            return self._conn.execute(sql, params).fetchall()
+
+    def distinct_gps_radios(self, since: Optional[datetime] = None) -> set[int]:
+        """Radio ids that emitted at least one lrrp_position in the window."""
+        where, params = self._build_where(since, None, None, None, ["lrrp_position"])
+        sql = f"SELECT DISTINCT src FROM events{where}"
+        with self._lock:
+            self._commit_locked()
+            rows = self._conn.execute(sql, params).fetchall()
+        return {int(r[0]) for r in rows if r[0] is not None}
+
+    def count_by_tgt(
+        self,
+        src: int,
+        since: Optional[datetime] = None,
+        types: Optional[Iterable[str]] = None,
+    ) -> dict[int, int]:
+        """{tgt: count} for one radio's events, grouped in SQL."""
+        where, params = self._build_where(since, None, src, None, types)
+        # ``src`` is always present, so ``where`` is never empty here.
+        sql = (
+            f"SELECT tgt, COUNT(*) FROM events{where} "
+            "AND tgt IS NOT NULL GROUP BY tgt"
+        )
+        with self._lock:
+            self._commit_locked()
+            return {
+                int(row[0]): int(row[1])
+                for row in self._conn.execute(sql, params)
+            }
+
+    def radio_bounds(
+        self,
+        radio_id: int,
+        since: Optional[datetime] = None,
+    ) -> tuple[Optional[str], Optional[str]]:
+        """(first_ts, last_ts) where the radio appears as src OR tgt.
+
+        Two index-friendly MIN/MAX queries (src=?, tgt=?) merged in Python
+        — a single ``src=? OR tgt=?`` predicate would defeat both partial
+        indexes and scan the table.
+        """
+        bounds: list[tuple[Optional[str], Optional[str]]] = []
+        for col in ("src", "tgt"):
+            clauses = [f"{col} = ?"]
+            params: list = [radio_id]
+            if since is not None:
+                clauses.append("ts >= ?")
+                params.append(since.isoformat())
+            sql = f"SELECT MIN(ts), MAX(ts) FROM events WHERE {' AND '.join(clauses)}"
+            with self._lock:
+                self._commit_locked()
+                row = self._conn.execute(sql, params).fetchone()
+            bounds.append((row[0], row[1]))
+        firsts = [b[0] for b in bounds if b[0] is not None]
+        lasts = [b[1] for b in bounds if b[1] is not None]
+        return (min(firsts) if firsts else None, max(lasts) if lasts else None)
+
+    def hourly_histogram(
+        self,
+        radio_id: int,
+        since: Optional[datetime] = None,
+    ) -> list[int]:
+        """24-bucket histogram of the radio's activity (src or tgt rows).
+
+        ``substr(ts, 12, 2)`` is the HH of a naive ISO timestamp. Built as
+        a UNION ALL of two per-column GROUP BYs so each side uses its
+        partial index. Known approximation vs the old Python de-dup: an
+        event where the radio is BOTH src and tgt counts twice here —
+        rare, and the histogram is illustrative.
+        """
+        since_clause = " AND ts >= ?" if since is not None else ""
+        sql = (
+            "SELECT hh, SUM(c) FROM ("
+            f"  SELECT substr(ts, 12, 2) AS hh, COUNT(*) AS c FROM events"
+            f"  WHERE src = ?{since_clause} GROUP BY hh"
+            "  UNION ALL"
+            f"  SELECT substr(ts, 12, 2) AS hh, COUNT(*) AS c FROM events"
+            f"  WHERE tgt = ?{since_clause} GROUP BY hh"
+            ") GROUP BY hh"
+        )
+        params: list = [radio_id]
+        if since is not None:
+            params.append(since.isoformat())
+        params.append(radio_id)
+        if since is not None:
+            params.append(since.isoformat())
+        hourly = [0] * 24
+        with self._lock:
+            self._commit_locked()
+            for hh, c in self._conn.execute(sql, params):
+                try:
+                    hour = int(hh)
+                except (TypeError, ValueError):
+                    continue
+                if 0 <= hour <= 23:
+                    hourly[hour] = int(c)
+        return hourly
+
+    def count_encryption_by_slot(
+        self,
+        since: Optional[datetime] = None,
+    ) -> dict[int, int]:
+        """{slot: count} of encryption events in the window."""
+        where, params = self._build_where(since, None, None, None, ["encryption"])
+        sql = f"SELECT slot, COUNT(*) FROM events{where} GROUP BY slot"
+        with self._lock:
+            self._commit_locked()
+            return {
+                int(row[0]): int(row[1])
+                for row in self._conn.execute(sql, params)
+                if row[0] is not None
+            }
 
     # --- maintenance ---
 

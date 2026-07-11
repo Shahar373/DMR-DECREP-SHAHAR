@@ -26,13 +26,6 @@ _PAIR_TYPES = ("voice_call", "preamble_csbk", "data_header", "lrrp_request")
 _PRIVATE_ADDRESSING = {"Individual", "Indiv"}
 _GROUP_ADDRESSING = {"Group"}
 
-# Safety cap on rows materialised into Python — protects a low-RAM Pi
-# from runaway windows. 500k rows × ~250 B/row of payload JSON ≈ 120 MB,
-# which fits even on a 1 GB Pi. A busy 24 h window at this site sees
-# tens of thousands of pair-ish events, so this cap is never hit in
-# practice — it just prevents an OOM if the rate ever spikes 10×.
-_ROW_HARD_CAP = 500_000
-
 
 def _classify(row_type: str, addressing: Optional[str]) -> Optional[str]:
     """Return 'group', 'private', or None for an event row."""
@@ -65,9 +58,12 @@ def compute_talker_pairs(
     now = now or datetime.now()
     since = now - timedelta(seconds=window_seconds)
 
-    # Pull every pair-ish row once. payload carries the addressing field we
-    # need to classify group vs private without a second query.
-    rows = index.query(since=since, types=list(_PAIR_TYPES), limit=_ROW_HARD_CAP)
+    # Grouped in SQLite: one row per distinct (src, tgt, type, addressing)
+    # combination with COUNT + MAX(ts). This used to pull every pair-ish
+    # payload row into Python (up to 500k rows ≈ 120 MB per call on a wide
+    # window) and Counter() over them — the grouped result is thousands of
+    # tuples at most, and the aggregation below is arithmetically identical.
+    grouped = index.pair_counts(since=since, types=list(_PAIR_TYPES))
 
     # Per-radio aggregates (for node attributes).
     radio_total_calls: Counter[int] = Counter()
@@ -79,30 +75,27 @@ def compute_talker_pairs(
     # Private edges: directed pair counts.
     private_pair: Counter[tuple[int, int]] = Counter()
 
-    for row in rows:
-        src = row.get("src")
-        tgt = row.get("tgt")
+    for src, tgt, et, addressing, count, max_ts in grouped:
         if src is None or tgt is None:
             continue
         # src=0 is DSD-FME's pre-LC placeholder, not a real radio id.
         if src == 0 or tgt == 0:
             continue
-        et = row.get("type")
-        kind = _classify(et, row.get("addressing"))
+        kind = _classify(et, addressing)
         if kind is None:
             continue
-        ts = row.get("timestamp", "")
-        radio_total_calls[src] += 1
+        ts = max_ts or ""
+        radio_total_calls[src] += count
         # Last-seen: ISO strings sort lexicographically.
         if ts > radio_last_seen.get(src, ""):
             radio_last_seen[src] = ts
         if kind == "group":
-            tg_radio_count[tgt][src] += 1
+            tg_radio_count[tgt][src] += count
         elif kind == "private":
-            private_pair[(src, tgt)] += 1
+            private_pair[(src, tgt)] += count
             # For private edges tgt is a radio id, not a TG — credit it too
             # so it doesn't show up as a node with total_calls=0.
-            radio_total_calls[tgt] += 1
+            radio_total_calls[tgt] += count
             if ts > radio_last_seen.get(tgt, ""):
                 radio_last_seen[tgt] = ts
 
@@ -132,11 +125,7 @@ def compute_talker_pairs(
     # in the schema, so this stays 0 for v0.10.0. (Operator can still see the
     # global encrypted count on /stats.)
     # has_gps: did this radio emit any lrrp_position in window?
-    gps_radios = {
-        row.get("src")
-        for row in index.query(since=since, types=["lrrp_position"], limit=_ROW_HARD_CAP)
-        if row.get("src") is not None
-    }
+    gps_radios = index.distinct_gps_radios(since=since)
 
     edges: list[dict] = []
     for pair, w in group_weights.items():
