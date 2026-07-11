@@ -279,7 +279,7 @@ async def get_health():
     last_event_at = None
     if _state is not None:
         last_event_at = getattr(_state, "_last_event_at", None)
-    jsonl_path = _event_log.jsonl_path if _event_log is not None else None
+    jsonl_path = _event_log.history_path if _event_log is not None else None
     db_path = None
     writer_health: Optional[dict] = None
     if _event_log is not None:
@@ -371,7 +371,7 @@ async def quality_window(window: int = Query(3600, ge=60, le=7 * 86400)):
     operators want to see — "is the link healthy *right now*". Prefers the
     SQLite index when available; falls back to scanning the JSONL.
     """
-    path = _event_log.jsonl_path if _event_log is not None else None
+    path = _event_log.history_path if _event_log is not None else None
     # On a cold-start day before the index is populated this falls through to
     # a full JSONL scan — hundreds of MB of disk reads on a long-running Pi.
     # Off-loop (and behind the heavy-endpoint semaphore) so it never
@@ -381,15 +381,22 @@ async def quality_window(window: int = Query(3600, ge=60, le=7 * 86400)):
     )
 
 
-def _history_filters(since, until, src, tgt, types):
+def _history_filters(since, until, src, tgt, types, day=None):
     type_list = [t.strip() for t in types.split(",") if t.strip()] if types else None
-    return {
+    filters = {
         "since": parse_since(since),
         "until": parse_since(until),
         "src": src,
         "tgt": tgt,
         "types": type_list,
     }
+    if day:
+        from .export import is_valid_day
+        if not is_valid_day(day):
+            raise HTTPException(status_code=422, detail="day must be YYYY-MM-DD")
+        filters["day_from"] = day
+        filters["day_to"] = day
+    return filters
 
 
 @app.get("/api/history")
@@ -399,6 +406,7 @@ async def history(
     src: Optional[int] = Query(None, description="Filter by source radio id"),
     tgt: Optional[int] = Query(None, description="Filter by talkgroup / target id"),
     types: Optional[str] = Query(None, description="Comma-separated EventType values"),
+    day: Optional[str] = Query(None, description="Restrict to one local day (YYYY-MM-DD)"),
     limit: int = Query(1000, ge=1, le=2000),
     offset: int = Query(0, ge=0),
 ):
@@ -411,10 +419,10 @@ async def history(
     spike big enough to matter on a Pi); bulk pulls belong to the
     streaming CSV export.
     """
-    path = _event_log.jsonl_path if _event_log is not None else None
+    path = _event_log.history_path if _event_log is not None else None
     if path is None:
         return {"events": [], "limit": limit, "offset": offset, "truncated": False}
-    filters = _history_filters(since, until, src, tgt, types)
+    filters = _history_filters(since, until, src, tgt, types, day=day)
     # The indexed path can materialise up to ``limit`` JSON-decoded dicts;
     # the fallback path walks the on-disk JSONL line-by-line. Both are
     # synchronous and would block every other coroutine if run on the loop.
@@ -452,11 +460,12 @@ async def history_csv(
     src: Optional[int] = Query(None),
     tgt: Optional[int] = Query(None),
     types: Optional[str] = Query(None),
+    day: Optional[str] = Query(None),
 ):
-    path = _event_log.jsonl_path if _event_log is not None else None
+    path = _event_log.history_path if _event_log is not None else None
     if path is None:
         return Response("", media_type="text/csv")
-    filters = _history_filters(since, until, src, tgt, types)
+    filters = _history_filters(since, until, src, tgt, types, day=day)
     idx = _prefer_index()
     if idx is not None:
         from .event_index import stream_query
@@ -491,6 +500,155 @@ async def history_csv(
         iterator,
         media_type="text/csv; charset=utf-8",
         headers={"Content-Disposition": f'attachment; filename="{fname}"'},
+    )
+
+
+@app.get("/api/days")
+async def list_days():
+    """Days with recorded data — drives the UI day picker and tells the
+    operator what's exportable. Prefers the SQLite ``day`` column
+    (indexed GROUP BY); falls back to listing partition files."""
+    idx = _prefer_index()
+    if idx is not None:
+        return {"days": await asyncio.to_thread(idx.days_summary)}
+    if (
+        _event_log is not None
+        and getattr(_event_log, "partition", False)
+        and _event_log.partition_dir is not None
+    ):
+        from .event_log import _day_from_filename
+
+        def _scan():
+            out = []
+            for p in sorted(_event_log.partition_dir.glob("*.jsonl")):
+                d = _day_from_filename(p)
+                try:
+                    size = p.stat().st_size
+                except OSError:
+                    continue
+                out.append({
+                    "day": d or "unknown",
+                    "events": None,
+                    "voice_events": None,
+                    "first_ts": None,
+                    "last_ts": None,
+                    "bytes": size,
+                })
+            return out
+
+        return {"days": await asyncio.to_thread(_scan)}
+    return {"days": []}
+
+
+@app.get("/api/export")
+async def export_range(
+    day: Optional[str] = Query(None, description="One local day, YYYY-MM-DD"),
+    from_day: Optional[str] = Query(None, alias="from", description="Range start day (inclusive)"),
+    to_day: Optional[str] = Query(None, alias="to", description="Range end day (inclusive)"),
+    format: str = Query("ndjson", pattern="^(ndjson|csv)$"),
+    types: Optional[str] = Query(None),
+    src: Optional[int] = Query(None),
+    tgt: Optional[int] = Query(None),
+):
+    """Structured export of a day or an inclusive day range.
+
+    NDJSON of a single unfiltered day streams the raw partition file
+    byte-for-byte (the file IS the export); everything else streams
+    through the read-only SQLite cursor (or the JSONL fallback) with
+    O(batch) memory. 404 when the index knows the range is empty.
+    """
+    import json as _json
+
+    from .export import is_valid_day
+
+    if day:
+        if not is_valid_day(day):
+            raise HTTPException(status_code=422, detail="day must be YYYY-MM-DD")
+        day_from, day_to = day, day
+    elif from_day and to_day:
+        if not (is_valid_day(from_day) and is_valid_day(to_day)):
+            raise HTTPException(status_code=422, detail="from/to must be YYYY-MM-DD")
+        if from_day > to_day:
+            raise HTTPException(status_code=422, detail="from must be <= to")
+        day_from, day_to = from_day, to_day
+    else:
+        raise HTTPException(
+            status_code=422,
+            detail="specify day=YYYY-MM-DD, or from= and to=",
+        )
+
+    type_list = [t.strip() for t in types.split(",") if t.strip()] if types else None
+    filtered = bool(type_list or src is not None or tgt is not None)
+    label = day_from if day_from == day_to else f"{day_from}_{day_to}"
+
+    # Fast path: the day file itself is already exactly the export.
+    if (
+        format == "ndjson" and not filtered and day_from == day_to
+        and _event_log is not None and getattr(_event_log, "partition", False)
+    ):
+        p = _event_log.day_file(day_from)
+        if p.exists():
+            return FileResponse(
+                p,
+                media_type="application/x-ndjson",
+                filename=f"dmr_{label}.ndjson",
+            )
+
+    idx = _prefer_index()
+    if idx is not None:
+        from .event_index import stream_query
+
+        idx.flush()
+        n = await _run_heavy(
+            idx.count, types=type_list, src=src, tgt=tgt,
+            day_from=day_from, day_to=day_to,
+        )
+        if n == 0:
+            raise HTTPException(status_code=404, detail=f"no events for {label}")
+        row_iter = stream_query(
+            idx.db_path, src=src, tgt=tgt, types=type_list,
+            day_from=day_from, day_to=day_to,
+        )
+    else:
+        path = _event_log.history_path if _event_log is not None else None
+        if path is None or not path.exists():
+            raise HTTPException(status_code=404, detail="no event history")
+        row_iter = stream_history(
+            path, src=src, tgt=tgt, types=type_list,
+            day_from=day_from, day_to=day_to,
+        )
+
+    if format == "ndjson":
+        def _ndjson():
+            for obj in row_iter:
+                yield _json.dumps(obj, separators=(",", ":")) + "\n"
+
+        return StreamingResponse(
+            _ndjson(),
+            media_type="application/x-ndjson",
+            headers={"Content-Disposition":
+                     f'attachment; filename="dmr_{label}.ndjson"'},
+        )
+
+    import csv as _csv
+    import io as _io
+
+    def _csv_iter():
+        buf = _io.StringIO()
+        writer = _csv.DictWriter(buf, fieldnames=CSV_COLUMNS, extrasaction="ignore")
+        writer.writeheader()
+        yield buf.getvalue()
+        buf.seek(0); buf.truncate()
+        for obj in row_iter:
+            writer.writerow(_row_from_dict(obj))
+            yield buf.getvalue()
+            buf.seek(0); buf.truncate()
+
+    return StreamingResponse(
+        _csv_iter(),
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition":
+                 f'attachment; filename="dmr_{label}.csv"'},
     )
 
 

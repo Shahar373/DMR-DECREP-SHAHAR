@@ -35,10 +35,17 @@ from pathlib import Path
 from typing import Optional
 
 
+# Layout v2 (0.20.0): ``day`` (= ts[:10], indexed — day-granular queries
+# and retention), plus nullable ``frequency`` / ``channel_label`` so the
+# future multi-frequency capture phase needs no second schema migration.
+# ``idx_events_day`` is created by ``_migrate_schema`` (not here) because
+# CREATE INDEX on a pre-v2 table without the column would fail before the
+# ALTERs run.
 _SCHEMA_DDL = """
 CREATE TABLE IF NOT EXISTS events (
     id INTEGER PRIMARY KEY,
     ts TEXT NOT NULL,
+    day TEXT,
     type TEXT NOT NULL,
     src INTEGER,
     tgt INTEGER,
@@ -46,6 +53,8 @@ CREATE TABLE IF NOT EXISTS events (
     addressing TEXT,
     error_type TEXT,
     encrypted INTEGER,
+    frequency REAL,
+    channel_label TEXT,
     schema_version INTEGER NOT NULL,
     payload TEXT NOT NULL
 );
@@ -60,10 +69,12 @@ CREATE TABLE IF NOT EXISTS _meta (
 );
 """
 
+_LAYOUT_VERSION = 2
+
 _INSERT_SQL = (
-    "INSERT INTO events(ts, type, src, tgt, slot, addressing, "
-    "error_type, encrypted, schema_version, payload) "
-    "VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+    "INSERT INTO events(ts, day, type, src, tgt, slot, addressing, "
+    "error_type, encrypted, frequency, channel_label, schema_version, payload) "
+    "VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
 )
 
 _BATCH_SIZE = 100
@@ -78,6 +89,8 @@ def stream_query(
     tgt: Optional[int] = None,
     types: Optional[Iterable[str]] = None,
     batch_size: int = 500,
+    day_from: Optional[str] = None,
+    day_to: Optional[str] = None,
 ) -> Iterator[dict]:
     """Stream matching events from the index with O(batch_size) memory.
 
@@ -94,7 +107,9 @@ def stream_query(
     Raises ``sqlite3.OperationalError`` if the DB file doesn't exist —
     callers fall back to the JSONL scan path, same as an empty index.
     """
-    where, params = EventIndex._build_where(since, until, src, tgt, types)
+    where, params = EventIndex._build_where(
+        since, until, src, tgt, types, day_from=day_from, day_to=day_to,
+    )
     sql = f"SELECT payload FROM events{where} ORDER BY ts"
     conn = sqlite3.connect(
         f"file:{Path(db_path)}?mode=ro", uri=True, check_same_thread=False,
@@ -109,6 +124,14 @@ def stream_query(
                 yield json.loads(r[0])
     finally:
         conn.close()
+
+
+def _day_of(ts: str) -> Optional[str]:
+    """``ts[:10]`` when it looks like a date, else None. Timestamps are
+    naive-local ISO strings, so the day prefix is always the local day."""
+    if isinstance(ts, str) and len(ts) >= 10 and ts[4] == "-" and ts[7] == "-":
+        return ts[:10]
+    return None
 
 
 def _extract_columns(ev: dict) -> tuple:
@@ -126,8 +149,10 @@ def _extract_columns(ev: dict) -> tuple:
     addressing = ev.get("addressing")
     error_type = ev.get("error_type") if et == "quality" else None
     encrypted = 1 if et == "encryption" else None
+    ts = ev.get("timestamp", "")
     return (
-        ev.get("timestamp", ""),
+        ts,
+        _day_of(ts),
         et,
         src,
         tgt,
@@ -135,6 +160,8 @@ def _extract_columns(ev: dict) -> tuple:
         addressing,
         error_type,
         encrypted,
+        ev.get("frequency"),
+        ev.get("channel_label"),
         int(ev.get("schema_version", 1)),
         json.dumps(ev, separators=(",", ":")),
     )
@@ -159,7 +186,63 @@ class EventIndex:
         self._timer: Optional[threading.Timer] = None
         self._closed = False
         self.index_outdated = False
+        self._migrate_schema()
         self._record_schema_version()
+
+    def _migrate_schema(self) -> None:
+        """Bring a pre-v2 DB up to the current layout (day/frequency/
+        channel_label columns + day index) and backfill ``day``.
+
+        Runs once per DB (guarded by the ``layout_version`` meta key).
+        The backfill is chunked (50k rows/transaction) with progress to
+        stderr — a multi-GB legacy DB on a Pi SD card can take minutes,
+        and this runs before serving starts.
+        """
+        cur = self._conn.execute("SELECT value FROM _meta WHERE key='layout_version'")
+        row = cur.fetchone()
+        if row is not None and int(row[0]) >= _LAYOUT_VERSION:
+            return
+        existing = {
+            r[1] for r in self._conn.execute("PRAGMA table_info(events)")
+        }
+        for col, decl in (
+            ("day", "TEXT"),
+            ("frequency", "REAL"),
+            ("channel_label", "TEXT"),
+        ):
+            if col not in existing:
+                self._conn.execute(f"ALTER TABLE events ADD COLUMN {col} {decl}")
+        self._conn.commit()
+        # Chunked day backfill for pre-v2 rows.
+        total = 0
+        while True:
+            cur = self._conn.execute(
+                "UPDATE events SET day = substr(ts, 1, 10) WHERE rowid IN ("
+                "  SELECT rowid FROM events WHERE day IS NULL LIMIT 50000"
+                ")"
+            )
+            self._conn.commit()
+            if cur.rowcount <= 0:
+                break
+            total += cur.rowcount
+            print(
+                f"# event index: day backfill {total:,} rows...",
+                file=sys.stderr,
+            )
+        self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_events_day ON events(day)"
+        )
+        self._conn.execute(
+            "INSERT OR REPLACE INTO _meta(key, value) VALUES('layout_version', ?)",
+            (str(_LAYOUT_VERSION),),
+        )
+        self._conn.commit()
+        if total:
+            print(
+                f"# event index: layout v{_LAYOUT_VERSION} migration done "
+                f"({total:,} rows backfilled)",
+                file=sys.stderr,
+            )
 
     def _record_schema_version(self) -> None:
         cur = self._conn.execute("SELECT value FROM _meta WHERE key='schema_version'")
@@ -241,6 +324,8 @@ class EventIndex:
         src: Optional[int],
         tgt: Optional[int],
         types: Optional[Iterable[str]],
+        day_from: Optional[str] = None,
+        day_to: Optional[str] = None,
     ) -> tuple[str, list]:
         clauses: list[str] = []
         params: list = []
@@ -250,6 +335,12 @@ class EventIndex:
         if until is not None:
             clauses.append("ts <= ?")
             params.append(until.isoformat())
+        if day_from is not None:
+            clauses.append("day >= ?")
+            params.append(day_from)
+        if day_to is not None:
+            clauses.append("day <= ?")
+            params.append(day_to)
         if src is not None:
             clauses.append("src = ?")
             params.append(src)
@@ -274,8 +365,12 @@ class EventIndex:
         limit: int = 500,
         offset: int = 0,
         descending: bool = False,
+        day_from: Optional[str] = None,
+        day_to: Optional[str] = None,
     ) -> list[dict]:
-        where, params = self._build_where(since, until, src, tgt, types)
+        where, params = self._build_where(
+            since, until, src, tgt, types, day_from=day_from, day_to=day_to,
+        )
         order = "DESC" if descending else "ASC"
         sql = f"SELECT payload FROM events{where} ORDER BY ts {order} LIMIT ? OFFSET ?"
         params.extend([int(limit), int(offset)])
@@ -311,8 +406,12 @@ class EventIndex:
         src: Optional[int] = None,
         tgt: Optional[int] = None,
         types: Optional[Iterable[str]] = None,
+        day_from: Optional[str] = None,
+        day_to: Optional[str] = None,
     ) -> int:
-        where, params = self._build_where(since, until, src, tgt, types)
+        where, params = self._build_where(
+            since, until, src, tgt, types, day_from=day_from, day_to=day_to,
+        )
         sql = f"SELECT COUNT(*) FROM events{where}"
         with self._lock:
             self._commit_locked()
@@ -488,10 +587,72 @@ class EventIndex:
                 if row[0] is not None
             }
 
+    # --- day partitioning ---
+
+    def days_summary(self) -> list[dict]:
+        """Per-day counts for ``/api/days`` — fast on ``idx_events_day``.
+
+        Returns ``[{day, events, voice_events, first_ts, last_ts}, ...]``
+        oldest day first.
+        """
+        sql = (
+            "SELECT day, COUNT(*), "
+            "SUM(CASE WHEN type='voice_call' THEN 1 ELSE 0 END), "
+            "MIN(ts), MAX(ts) "
+            "FROM events WHERE day IS NOT NULL GROUP BY day ORDER BY day"
+        )
+        with self._lock:
+            self._commit_locked()
+            rows = self._conn.execute(sql).fetchall()
+        return [
+            {
+                "day": r[0],
+                "events": int(r[1]),
+                "voice_events": int(r[2] or 0),
+                "first_ts": r[3],
+                "last_ts": r[4],
+            }
+            for r in rows
+        ]
+
+    def prune_days_older_than(
+        self, cutoff_day: str, chunk_size: int = 50_000,
+    ) -> int:
+        """Delete all rows with ``day < cutoff_day``. Returns rows removed.
+
+        Day-granular sibling of ``prune_older_than`` — an indexed range
+        DELETE on the ``day`` column, chunked like the ts-based prune so
+        readers get a chance between batches.
+        """
+        total = 0
+        sql = (
+            "DELETE FROM events WHERE rowid IN ("
+            "  SELECT rowid FROM events WHERE day < ? LIMIT ?"
+            ")"
+        )
+        while True:
+            with self._lock:
+                if self._closed:
+                    break
+                self._commit_locked()
+                cur = self._conn.execute(sql, (cutoff_day, chunk_size))
+                removed = cur.rowcount
+                self._conn.commit()
+            if removed <= 0:
+                break
+            total += removed
+            if removed < chunk_size:
+                break
+        return total
+
     # --- maintenance ---
 
     def rebuild_from_jsonl(self, jsonl_path: Path, progress_every: int = 100_000) -> int:
         """Drop the events table and replay every line from the JSONL.
+
+        ``jsonl_path`` may be a single file OR a day-partition directory —
+        a directory rebuilds from every ``*.jsonl`` inside it in sorted
+        (chronological) filename order.
 
         Used by ``--rebuild-index`` and by recovery flows when the index is
         out of sync. Returns the number of rows inserted.
@@ -507,6 +668,12 @@ class EventIndex:
         import time as _time
 
         jsonl_path = Path(jsonl_path)
+        if jsonl_path.is_dir():
+            sources = sorted(jsonl_path.glob("*.jsonl"))
+        elif jsonl_path.exists():
+            sources = [jsonl_path]
+        else:
+            sources = []
         BATCH = 5_000
         batch: list[tuple] = []
         with self._lock:
@@ -514,8 +681,15 @@ class EventIndex:
             self._conn.execute("DROP TABLE IF EXISTS events")
             self._conn.executescript(_SCHEMA_DDL)
             self._conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_events_day ON events(day)"
+            )
+            self._conn.execute(
                 "INSERT OR REPLACE INTO _meta(key, value) VALUES('schema_version', ?)",
                 (str(self.schema_version),),
+            )
+            self._conn.execute(
+                "INSERT OR REPLACE INTO _meta(key, value) VALUES('layout_version', ?)",
+                (str(_LAYOUT_VERSION),),
             )
             self._conn.execute(
                 "INSERT OR REPLACE INTO _meta(key, value) VALUES('built_at', ?)",
@@ -528,8 +702,8 @@ class EventIndex:
             self.index_outdated = False
             count = 0
             t0 = _time.monotonic()
-            if jsonl_path.exists():
-                with open(jsonl_path, "r", encoding="utf-8", errors="replace") as f:
+            for source in sources:
+                with open(source, "r", encoding="utf-8", errors="replace") as f:
                     for raw in f:
                         stripped = raw.strip()
                         if not stripped:
@@ -546,9 +720,11 @@ class EventIndex:
                             src = obj.get("radio_id")
                         error_type = obj.get("error_type") if et == "quality" else None
                         encrypted = 1 if et == "encryption" else None
+                        ts = obj.get("timestamp", "")
                         # Reuse the raw line verbatim — no re-serialisation cost.
                         batch.append((
-                            obj.get("timestamp", ""),
+                            ts,
+                            _day_of(ts),
                             et,
                             src,
                             obj.get("tgt"),
@@ -556,6 +732,8 @@ class EventIndex:
                             obj.get("addressing"),
                             error_type,
                             encrypted,
+                            obj.get("frequency"),
+                            obj.get("channel_label"),
                             int(obj.get("schema_version", 1)),
                             stripped,
                         ))
@@ -570,10 +748,10 @@ class EventIndex:
                                     f"# rebuild: {count:>9,} rows ({rate:,.0f}/s)",
                                     file=_sys.stderr,
                                 )
-                    if batch:
-                        self._conn.executemany(_INSERT_SQL, batch)
-                        count += len(batch)
-                        batch.clear()
+                if batch:
+                    self._conn.executemany(_INSERT_SQL, batch)
+                    count += len(batch)
+                    batch.clear()
             self._conn.commit()
         return count
 

@@ -9,6 +9,51 @@ Versioning follows [Semantic Versioning](https://semver.org/):
 Source of truth: `backend/__init__.py` (`__version__`). The dashboard
 footer shows the running build's version and `/api/version` exposes it.
 
+## [0.20.0] — 2026-07-11
+
+Day-partitioned data layer — collected data is now organised by local
+day with rollover at midnight, structured per-day export, and retention
+that drops whole days instead of rewriting a multi-GB file.
+
+### Added
+
+- **Per-day JSONL partitioning** (live CLI mode): events are written to
+  `events/events-YYYY-MM-DD.jsonl`. Rollover is *lazy by event date* — the
+  day file is picked from each event's own timestamp inside `append()`,
+  never by a wall-clock timer, so replaying a historical capture lands in
+  the capture's own days and no event can straddle a rotation.
+- **Automatic monolith migration**: a legacy single-file `events.jsonl` is
+  split into per-day files at startup (or explicitly via
+  `--migrate-jsonl`). Crash-safe and idempotent — buckets are staged in a
+  temp dir behind a COMPLETE marker, unreadable lines go to an
+  `-unknown-date` bucket (never dropped), and the legacy file is only ever
+  *renamed* to `events.jsonl.migrated` as a backup.
+- **`--retention-days N`** — day-granular retention: whole day files are
+  unlinked and their index rows deleted (indexed `DELETE WHERE day < ?`).
+  Mutually exclusive with the now-deprecated `--event-retention-hours`
+  (which, in partition mode, also degrades gracefully to whole-day
+  unlinks — the multi-GB JSONL rewrite is gone).
+- **`GET /api/days`** — days with data + per-day event/voice counts and
+  time bounds (indexed `GROUP BY day`), for the upcoming day-picker UI.
+- **`GET /api/export?day=YYYY-MM-DD&format=ndjson|csv`** (and
+  `from=`/`to=` ranges, plus `types`/`src`/`tgt` filters) — streaming
+  structured export. A single unfiltered day as NDJSON streams the raw
+  partition file byte-for-byte; everything else goes through the
+  read-only SQLite cursor with O(batch) memory. `day=` filter also added
+  to `/api/history` and `/api/history.csv`.
+- **SQLite layout v2**: `day` column (= `ts[:10]`, indexed) plus nullable
+  `frequency`/`channel_label` columns and matching CSV tail columns —
+  pre-provisioned for the SDRplay multi-frequency phase so no second
+  migration will be needed. Existing DBs are ALTERed and backfilled in
+  chunked transactions at startup (progress logged; minutes on a multi-GB
+  Pi SD card, one time).
+
+### Changed
+
+- Startup priming reads **today's** day file only, instead of pydantic-
+  parsing the entire history under the buffer lock on every boot.
+  `/api/health` reports the summed size of all day files.
+
 ## [0.19.0] — 2026-07-11
 
 Load hardening, part 2 of 2 — the heavy analytical endpoints now aggregate

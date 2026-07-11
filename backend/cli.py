@@ -189,6 +189,40 @@ async def _periodic_event_retention(
             pass
 
 
+async def _periodic_day_retention(
+    event_log,
+    days: int,
+    stop_event: asyncio.Event,
+    interval_seconds: float = 3600.0,
+) -> None:
+    """Hourly day-granular retention: unlink whole day files older than
+    ``days`` local days and DELETE their index rows. Cheap — no JSONL
+    rewrite — so no startup delay is needed."""
+    if event_log is None or days <= 0:
+        return
+    from datetime import date as _date, timedelta as _td
+    while not stop_event.is_set():
+        cutoff_day = (_date.today() - _td(days=days)).isoformat()
+        try:
+            metrics = await asyncio.to_thread(
+                event_log.prune_days_older_than, cutoff_day,
+            )
+            if metrics["files_deleted"] or metrics["db_deleted"]:
+                print(
+                    f"# day-retention: dropped {metrics['files_deleted']} day "
+                    f"file(s) ({metrics['bytes_freed']/1024/1024:.1f} MiB) and "
+                    f"{metrics['db_deleted']} index rows (day < {cutoff_day})",
+                    file=sys.stderr,
+                )
+        except Exception as e:  # noqa: BLE001
+            print(f"# day-retention: pass failed: {e}", file=sys.stderr)
+        try:
+            await asyncio.wait_for(stop_event.wait(), timeout=interval_seconds)
+            break
+        except asyncio.TimeoutError:
+            pass
+
+
 async def _periodic_fsync(
     event_log,
     stop_event: asyncio.Event,
@@ -331,7 +365,12 @@ def _parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     mode.add_argument("--live", action="store_true", help="spawn dsd-fme and stream live")
     mode.add_argument("--replay", metavar="FILE", help="replay a captured dsd-fme stderr log")
     mode.add_argument("--rebuild-index", action="store_true",
-                      help="rebuild the SQLite event index from --event-log and exit")
+                      help="rebuild the SQLite event index from --event-log "
+                           "(single file or day-partition dir) and exit")
+    mode.add_argument("--migrate-jsonl", action="store_true",
+                      help="split a legacy monolithic events.jsonl into "
+                           "per-day partition files and exit (also runs "
+                           "automatically at startup when safe)")
 
     p.add_argument("--input", default="pulse:dmr_capture.monitor",
                    help="dsd-fme -i input device (live mode, default: %(default)s)")
@@ -376,10 +415,15 @@ def _parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
                         "many hours; checked once an hour (default: %(default)s, "
                         "0 disables)")
     p.add_argument("--event-retention-hours", type=float, default=0.0,
-                   help="delete events older than this many hours from both "
-                        "the SQLite index and the JSONL; checked once an hour "
+                   help="DEPRECATED — prefer --retention-days. Delete events "
+                        "older than this many hours; checked once an hour "
                         "(default: %(default)s, 0 disables — events kept "
-                        "forever)")
+                        "forever). Mutually exclusive with --retention-days.")
+    p.add_argument("--retention-days", type=int, default=0,
+                   help="keep this many whole local days of events; older "
+                        "day files are unlinked and their index rows "
+                        "deleted, checked once an hour (default: "
+                        "%(default)s, 0 disables — events kept forever)")
     p.add_argument("--alerts-rules", default="alerts.json",
                    help="path to the Alerts Engine rules file "
                         "(default: %(default)s, empty string disables)")
@@ -433,11 +477,22 @@ async def _run(args: argparse.Namespace) -> None:
     from .event_log import EventLog
     jsonl_path = Path(args.event_log) if args.event_log else None
     db_path = Path(args.event_db) if args.event_db else None
+    # One-time monolith → per-day migration, BEFORE the writer opens so
+    # there are no concurrent appends. Crash-safe: the legacy file is only
+    # renamed (never deleted) and a marker gates the rename phase.
+    if jsonl_path is not None:
+        from .export import MigrationRefused, migrate_monolith
+        try:
+            migrate_monolith(jsonl_path)
+        except MigrationRefused as exc:
+            print(f"# FATAL: {exc}", file=sys.stderr)
+            raise SystemExit(2)
     event_log = EventLog(
         jsonl_path=jsonl_path,
         capacity=args.event_buffer,
         db_path=db_path,
         enable_index=not args.no_event_db,
+        partition=True,
     )
     if event_log.index is not None:
         try:
@@ -572,6 +627,13 @@ async def _run(args: argparse.Namespace) -> None:
         )
         event_retention_task.add_done_callback(_surface_task_exception("event-retention"))
 
+    day_retention_task: Optional[asyncio.Task] = None
+    if args.retention_days > 0:
+        day_retention_task = asyncio.create_task(
+            _periodic_day_retention(event_log, args.retention_days, stop_event)
+        )
+        day_retention_task.add_done_callback(_surface_task_exception("day-retention"))
+
     if args.live:
         # dsd-fme writes per-call WAVs to --calls-dir via `-7 <dir> -P`.
         # `-7` must come BEFORE `-P` per the dsd-fme help.
@@ -634,27 +696,68 @@ async def _run(args: argparse.Namespace) -> None:
 
 def _rebuild_index(args: argparse.Namespace) -> int:
     from .event_index import EventIndex
+    from .export import partition_dir_for
     from .models import EVENT_SCHEMA_VERSION
 
     jsonl_path = Path(args.event_log) if args.event_log else None
-    if jsonl_path is None or not jsonl_path.exists():
-        print(f"# --rebuild-index: {jsonl_path} not found", file=sys.stderr)
+    if jsonl_path is None:
+        print("# --rebuild-index: no --event-log given", file=sys.stderr)
+        return 1
+    # Prefer the day-partition dir when it exists; fall back to the
+    # legacy single file.
+    source = partition_dir_for(jsonl_path)
+    if not source.is_dir():
+        source = jsonl_path
+    if not source.exists():
+        print(f"# --rebuild-index: {source} not found", file=sys.stderr)
         return 1
     db_path = Path(args.event_db) if args.event_db else jsonl_path.with_suffix(".db")
-    print(f"# rebuilding index at {db_path} from {jsonl_path}", file=sys.stderr)
+    print(f"# rebuilding index at {db_path} from {source}", file=sys.stderr)
     idx = EventIndex(db_path, schema_version=EVENT_SCHEMA_VERSION)
     try:
-        rows = idx.rebuild_from_jsonl(jsonl_path)
+        rows = idx.rebuild_from_jsonl(source)
     finally:
         idx.close()
     print(f"# event index: {rows} rows written", file=sys.stderr)
     return 0
 
 
+def _migrate_jsonl(args: argparse.Namespace) -> int:
+    from .export import MigrationRefused, migrate_monolith
+
+    jsonl_path = Path(args.event_log) if args.event_log else None
+    if jsonl_path is None:
+        print("# --migrate-jsonl: no --event-log given", file=sys.stderr)
+        return 1
+    try:
+        metrics = migrate_monolith(jsonl_path)
+    except MigrationRefused as exc:
+        print(f"# --migrate-jsonl: {exc}", file=sys.stderr)
+        return 2
+    if metrics is None:
+        print(
+            f"# --migrate-jsonl: nothing to do — no legacy {jsonl_path} "
+            "and no unfinished migration",
+            file=sys.stderr,
+        )
+        return 0
+    print(f"# --migrate-jsonl: done ({metrics})", file=sys.stderr)
+    return 0
+
+
 def main(argv: Optional[list[str]] = None) -> None:
     args = _parse_args(argv)
+    if args.retention_days > 0 and args.event_retention_hours > 0:
+        print(
+            "# FATAL: --retention-days and --event-retention-hours are "
+            "mutually exclusive — pick one.",
+            file=sys.stderr,
+        )
+        sys.exit(2)
     if getattr(args, "rebuild_index", False):
         sys.exit(_rebuild_index(args))
+    if getattr(args, "migrate_jsonl", False):
+        sys.exit(_migrate_jsonl(args))
     try:
         asyncio.run(_run(args))
     except KeyboardInterrupt:
