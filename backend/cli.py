@@ -243,8 +243,20 @@ async def _periodic_snapshot(
     stop_event: asyncio.Event,
     serve: bool,
     evaluator=None,
+    persist_interval: float = 30.0,
 ) -> None:
+    import time as _time
+
     from . import server as srv  # lazy import — only needed when --serve is active
+
+    # Broadcast (trimmed, serialised once, fanned out) happens every tick;
+    # the full snapshot.json persist happens only every ``persist_interval``
+    # seconds. Writing the full state to the SD card at 1 Hz was both a
+    # wear concern and a growing CPU cost (payload grows with every radio
+    # ever heard). Worst case on power-yank: the last ``persist_interval``
+    # seconds of radio-state freshness — events themselves are bounded by
+    # the 5 s JSONL fsync cadence, so nothing is unrecoverable.
+    last_persist = 0.0  # monotonic; 0 → first tick persists immediately
     while not stop_event.is_set():
         try:
             await asyncio.wait_for(stop_event.wait(), timeout=interval)
@@ -268,16 +280,27 @@ async def _periodic_snapshot(
                 await asyncio.to_thread(evaluator.tick, now)
             except Exception as e:  # noqa: BLE001
                 print(f"# alerts: tick failed: {e}", file=sys.stderr)
-        try:
-            # Atomic write — power-yank mid-write must not leave a
-            # truncated snapshot. ``atomic_write_text`` also preserves
-            # the previous file as ``snapshot.json.bak`` so
-            # ``StateManager.load_snapshot`` can fall back to it.
-            atomic_write_text(path, state.snapshot().model_dump_json(indent=2))
-        except Exception as e:  # noqa: BLE001
-            print(f"# snapshot write failed: {e}", file=sys.stderr)
+        mono = _time.monotonic()
+        if last_persist == 0.0 or mono - last_persist >= persist_interval:
+            try:
+                # Atomic write — power-yank mid-write must not leave a
+                # truncated snapshot. ``atomic_write_text`` also preserves
+                # the previous file as ``snapshot.json.bak`` so
+                # ``StateManager.load_snapshot`` can fall back to it.
+                # Full (untrimmed) view — this is restart persistence.
+                atomic_write_text(path, state.snapshot().model_dump_json(indent=2))
+                last_persist = mono
+            except Exception as e:  # noqa: BLE001
+                print(f"# snapshot write failed: {e}", file=sys.stderr)
         if serve:
-            await srv.push_snapshot()
+            try:
+                payload = await asyncio.to_thread(
+                    lambda: state.snapshot(trim=True).model_dump_json()
+                )
+            except Exception as e:  # noqa: BLE001
+                print(f"# broadcast snapshot failed: {e}", file=sys.stderr)
+                continue
+            await srv.push_snapshot(payload)
 
 
 def _print_summary(state: StateManager) -> None:
@@ -318,7 +341,12 @@ def _parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     p.add_argument("--snapshot", default="snapshot.json",
                    help="periodic JSON snapshot path (default: %(default)s)")
     p.add_argument("--snapshot-interval", type=float, default=1.0,
-                   help="snapshot write interval in seconds (default: %(default)s)")
+                   help="broadcast tick interval in seconds — trimmed snapshot "
+                        "pushed to WS clients (default: %(default)s)")
+    p.add_argument("--snapshot-persist-interval", type=float, default=30.0,
+                   help="full snapshot.json write interval in seconds; the "
+                        "broadcast keeps ticking at --snapshot-interval "
+                        "(default: %(default)s)")
 
     p.add_argument("--replay-delay", type=float, default=0.0,
                    help="per-line sleep in replay mode to simulate live timing")
@@ -355,6 +383,13 @@ def _parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     p.add_argument("--alerts-rules", default="alerts.json",
                    help="path to the Alerts Engine rules file "
                         "(default: %(default)s, empty string disables)")
+    p.add_argument("--reset-token", default=None,
+                   help="shared secret for POST /api/reset (sent as the "
+                        "X-Reset-Token header); when unset, reset is "
+                        "allowed from localhost only")
+    p.add_argument("--dev-reload-html", action="store_true",
+                   help="re-read frontend HTML from disk on every request "
+                        "instead of caching at first hit (frontend dev)")
     return p.parse_args(argv)
 
 
@@ -474,6 +509,8 @@ async def _run(args: argparse.Namespace) -> None:
         srv.attach_event_log(event_log)
         srv.attach_snapshot_path(snapshot_path)
         srv.attach_evaluator(evaluator)
+        srv.attach_reset_token(args.reset_token)
+        srv.set_dev_reload_html(args.dev_reload_html)
         config = uvicorn.Config(
             srv.app,
             host="0.0.0.0",
@@ -506,6 +543,7 @@ async def _run(args: argparse.Namespace) -> None:
         _periodic_snapshot(
             state, snapshot_path, args.snapshot_interval, stop_event,
             args.serve, evaluator=evaluator,
+            persist_interval=args.snapshot_persist_interval,
         )
     )
     snap_task.add_done_callback(_surface_task_exception("snapshot"))

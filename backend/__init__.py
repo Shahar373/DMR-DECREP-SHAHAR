@@ -10,5 +10,5 @@ footer so it's obvious from the UI which build is running.
 """
 from __future__ import annotations
 
-__version__ = "0.17.0"
-__build_date__ = "2026-06-06"
+__version__ = "0.18.0"
+__build_date__ = "2026-07-11"

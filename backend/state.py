@@ -141,6 +141,11 @@ class DashboardSnapshot(BaseModel):
     system: SystemStatus
     quality: QualityCounters
     generated_at: datetime
+    # Total radios known to the StateManager. In a trimmed broadcast
+    # snapshot ``len(radios)`` may be smaller than this — the UI shows
+    # "N of M" so the operator knows rows were omitted for payload size.
+    # Additive field (defaults for old persisted snapshots).
+    radios_total: int = 0
 
 
 # ---------------------------------------------------------------------------
@@ -155,6 +160,8 @@ class StateManager:
         position_history_length: int = 50,
         on_call_start: Optional[Callable[[ActiveCall], None]] = None,
         on_call_end: Optional[Callable[[ActiveCall], None]] = None,
+        broadcast_max_radios: int = 2000,
+        broadcast_trail_max_age: timedelta = timedelta(minutes=15),
     ) -> None:
         self.radios: dict[int, Radio] = {}
         self.active_calls: dict[int, ActiveCall] = {}
@@ -165,6 +172,10 @@ class StateManager:
         self._last_event_at: Optional[datetime] = None
         self._on_call_start = on_call_start
         self._on_call_end = on_call_end
+        # Trim policy for broadcast (WS / /api/snapshot) payloads — the
+        # persisted snapshot.json always uses the full, untrimmed view.
+        self._broadcast_max_radios = broadcast_max_radios
+        self._broadcast_trail_max_age = broadcast_trail_max_age
 
     # --- public API ---
 
@@ -215,13 +226,49 @@ class StateManager:
         """Manually expire idle calls — useful when no events are flowing."""
         self._expire_idle_calls(now)
 
-    def snapshot(self) -> DashboardSnapshot:
+    def snapshot(self, trim: bool = False) -> DashboardSnapshot:
+        """Build a snapshot view of current state.
+
+        ``trim=False`` (default) is the full view used for persistence and
+        existing callers — every radio, full position trails.
+
+        ``trim=True`` is the broadcast view for the 1 Hz WebSocket push and
+        ``/api/snapshot``: the payload was previously unbounded (it grows
+        with every distinct radio id ever heard × up to 50 trail points
+        each) and was re-serialised on the event loop, which is the main
+        "dashboard freezes under load" failure mode. Trimming caps radios
+        at ``broadcast_max_radios`` (newest ``last_seen`` first) and drops
+        ``position_history`` for radios whose last GPS fix is older than
+        ``broadcast_trail_max_age``. ``radios_total`` always carries the
+        real count so the UI can say "showing N of M".
+        """
+        radios: dict[int, Radio]
+        if not trim:
+            radios = dict(self.radios)
+        else:
+            now = self._last_event_at or datetime.now()
+            source = self.radios
+            if len(source) > self._broadcast_max_radios:
+                keep = sorted(
+                    source.values(), key=lambda r: r.last_seen, reverse=True,
+                )[: self._broadcast_max_radios]
+                source = {r.id: r for r in keep}
+            radios = {}
+            for rid, radio in source.items():
+                trail_fresh = (
+                    radio.last_position is not None
+                    and now - radio.last_position.at <= self._broadcast_trail_max_age
+                )
+                if radio.position_history and not trail_fresh:
+                    radio = radio.model_copy(update={"position_history": []})
+                radios[rid] = radio
         return DashboardSnapshot(
-            radios=dict(self.radios),
+            radios=radios,
             active_calls=dict(self.active_calls),
             system=self.system,
             quality=self.quality,
             generated_at=self._last_event_at or datetime.now(),
+            radios_total=len(self.radios),
         )
 
     def load_snapshot(self, path) -> bool:

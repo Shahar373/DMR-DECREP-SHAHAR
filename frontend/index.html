@@ -949,8 +949,15 @@ document.getElementById('export-csv').addEventListener('click', () => {
 // ── Reset button ───────────────────────────────────────────────────
 document.getElementById('reset-data').addEventListener('click', async () => {
   if (!confirm('Clear all accumulated data? This cannot be undone.')) return;
+  const doReset = (headers) => fetch('/api/reset', { method: 'POST', headers });
   try {
-    const r = await fetch('/api/reset', { method: 'POST' });
+    let r = await doReset({});
+    if (r.status === 403) {
+      // Remote resets need the --reset-token secret (X-Reset-Token header).
+      const token = prompt('Reset requires a token (server --reset-token):');
+      if (!token) return;
+      r = await doReset({ 'X-Reset-Token': token });
+    }
     if (r.ok) location.reload();
     else alert('Reset failed: ' + r.statusText);
   } catch (e) {

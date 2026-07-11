@@ -9,6 +9,56 @@ Versioning follows [Semantic Versioning](https://semver.org/):
 Source of truth: `backend/__init__.py` (`__version__`). The dashboard
 footer shows the running build's version and `/api/version` exposes it.
 
+## [0.18.0] — 2026-07-11
+
+Load hardening, part 1 of 2 — closes the biggest "dashboard freezes or
+crashes under load" holes found in a full audit of the server layer.
+Groundwork for the day-partitioned data layer and the responsive UI that
+follow.
+
+### Added
+
+- **Trimmed broadcast snapshots.** The 1 Hz WebSocket payload (and
+  `/api/snapshot`) is now serialised **once per tick** and fanned out,
+  instead of being rebuilt per client/request on the event loop. The
+  broadcast view caps radios at 2000 (newest `last_seen` first) and drops
+  GPS trails older than 15 minutes; new additive `radios_total` field lets
+  the UI show "N of M". The persisted `snapshot.json` remains the full,
+  untrimmed view.
+- **`--snapshot-persist-interval`** (default 30 s) — full `snapshot.json`
+  writes now happen on their own cadence instead of at 1 Hz, cutting SD-card
+  wear and per-tick CPU. Worst case on power-yank: the last 30 s of
+  radio-state freshness; events themselves are still bounded by the 5 s
+  JSONL fsync.
+- **`stream_query()`** in `backend.event_index` — streams query results
+  from a dedicated read-only SQLite connection with `fetchmany`, O(batch)
+  memory. `/api/history.csv` now uses it; previously `iter_query()`
+  materialised the entire filtered history in RAM before the first byte
+  went out.
+- **Heavy-endpoint concurrency guard** — `/api/history`, `/api/network`,
+  `/api/radio/{id}` and `/api/quality` now run at most 2 at a time with a
+  short queue; excess requests get `503 + Retry-After: 2` instead of
+  exhausting the worker-thread pool.
+- **`--reset-token`** — `POST /api/reset` (destructive, previously
+  unauthenticated) now requires the `X-Reset-Token` header when a token is
+  configured, and is loopback-only otherwise. The dashboard prompts for the
+  token on 403.
+- **`--dev-reload-html`** — opt-out of the new in-memory HTML page cache
+  during frontend development.
+
+### Changed
+
+- `/api/history` `limit` ceiling lowered 20000 → 2000. Bulk pulls belong to
+  the streaming CSV export; a single 20k-dict JSON response was a real
+  memory spike on a Pi.
+- Frontend HTML pages are cached in memory after first read instead of
+  hitting the SD card on every request; shared static assets (when present)
+  are served from `/assets` via `StaticFiles`.
+- `/api/recordings` directory scans are cached: per-file WAV metadata keyed
+  by `(size, mtime)` plus a 2 s TTL memo of the full listing, so N dashboard
+  tabs polling every 3 s share one scan and headers are parsed once per
+  file version.
+
 ## [0.17.0] — 2026-06-06
 
 Fresh-Raspberry-Pi install hardening — a full audit (Python packaging, ARM

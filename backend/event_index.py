@@ -70,6 +70,47 @@ _BATCH_SIZE = 100
 _BATCH_SECONDS = 2.0
 
 
+def stream_query(
+    db_path: Path,
+    since: Optional[datetime] = None,
+    until: Optional[datetime] = None,
+    src: Optional[int] = None,
+    tgt: Optional[int] = None,
+    types: Optional[Iterable[str]] = None,
+    batch_size: int = 500,
+) -> Iterator[dict]:
+    """Stream matching events from the index with O(batch_size) memory.
+
+    Unlike ``EventIndex.iter_query`` (which materialises the entire result
+    set with ``fetchall()`` before yielding — a whole-history CSV export
+    used to load every matching row into RAM at once), this opens its OWN
+    read-only connection (WAL allows concurrent readers alongside the
+    writer) and walks the cursor with ``fetchmany``. No writer lock is
+    held across yields, so a slow download can't stall appends.
+
+    ``check_same_thread=False`` because StreamingResponse iterates sync
+    generators from a threadpool whose thread may differ per chunk.
+
+    Raises ``sqlite3.OperationalError`` if the DB file doesn't exist —
+    callers fall back to the JSONL scan path, same as an empty index.
+    """
+    where, params = EventIndex._build_where(since, until, src, tgt, types)
+    sql = f"SELECT payload FROM events{where} ORDER BY ts"
+    conn = sqlite3.connect(
+        f"file:{Path(db_path)}?mode=ro", uri=True, check_same_thread=False,
+    )
+    try:
+        cur = conn.execute(sql, params)
+        while True:
+            rows = cur.fetchmany(batch_size)
+            if not rows:
+                break
+            for r in rows:
+                yield json.loads(r[0])
+    finally:
+        conn.close()
+
+
 def _extract_columns(ev: dict) -> tuple:
     """Pull the indexed columns out of a JSON-serialised event dict.
 
@@ -181,6 +222,16 @@ class EventIndex:
                 self._timer = None  # the firing timer is us; mark as already cancelled
                 self._commit_locked()
 
+    def flush(self) -> None:
+        """Commit any batched-but-uncommitted appends.
+
+        Called before ``stream_query`` opens its read-only connection so
+        the export sees rows appended in the last ``_BATCH_SECONDS``.
+        """
+        with self._lock:
+            if not self._closed:
+                self._commit_locked()
+
     # --- read path ---
 
     @staticmethod
@@ -239,6 +290,10 @@ class EventIndex:
         tgt: Optional[int] = None,
         types: Optional[Iterable[str]] = None,
     ) -> Iterator[dict]:
+        """Deprecated for large result sets — materialises everything with
+        ``fetchall()`` before yielding. Prefer the module-level
+        ``stream_query`` which streams from a separate read-only
+        connection with bounded memory."""
         where, params = self._build_where(since, until, src, tgt, types)
         sql = f"SELECT payload FROM events{where} ORDER BY ts"
         with self._lock:
