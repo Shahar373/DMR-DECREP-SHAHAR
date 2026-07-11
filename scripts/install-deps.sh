@@ -38,6 +38,11 @@ DSD_BUILD_PKGS=(build-essential cmake git pkg-config libtool autoconf
 # NOT install the full `pulseaudio` daemon so we don't fight PipeWire.
 AUDIO_PKGS=(pulseaudio-utils)
 
+# SoapySDR runtime for --rf-backend soapy (direct SDRplay control, no
+# SDRconnect / virtual cable). The proprietary SDRplay API service itself
+# must come from sdrplay.com — see scripts/setup-sdrplay.sh.
+SDR_PKGS=(soapysdr-tools libsoapysdr-dev)
+
 # Optional Phase 4b (audio streaming → Icecast). Not used by the current
 # code; installed best-effort so a later --serve audio feature works.
 OPTIONAL_PKGS=(ffmpeg icecast2)
@@ -48,6 +53,12 @@ $SUDO apt-get update -y
 echo "# installing core + dsd-fme build deps + audio utils"
 $SUDO apt-get install -y "${PY_PKGS[@]}" "${DSD_BUILD_PKGS[@]}" "${AUDIO_PKGS[@]}"
 
+echo "# installing SoapySDR runtime (for --rf-backend soapy)"
+if ! $SUDO apt-get install -y "${SDR_PKGS[@]}"; then
+    echo "  (SoapySDR packages failed — only needed for --rf-backend soapy;"
+    echo "   see scripts/setup-sdrplay.sh)"
+fi
+
 echo "# installing optional Phase 4b packages (ffmpeg, icecast2)"
 if ! $SUDO apt-get install -y "${OPTIONAL_PKGS[@]}"; then
     echo "  (optional packages failed to install — safe to ignore for now)"
@@ -56,7 +67,8 @@ fi
 echo ""
 echo "System dependencies installed. Next steps:"
 echo "  bash scripts/check_env.sh         # verify (will still flag dsd-fme as missing)"
-echo "  bash scripts/setup-pulseaudio.sh  # create the dmr_capture capture sink"
+echo "  bash scripts/setup-sdrplay.sh     # direct SDR control (--rf-backend soapy)"
+echo "  bash scripts/setup-pulseaudio.sh  # OR the legacy dmr_capture sink (pulse)"
 echo "  python3 -m venv .venv && .venv/bin/pip install -r requirements.txt"
 echo "  .venv/bin/pytest tests/           # 177/177 should pass"
 echo ""

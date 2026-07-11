@@ -75,10 +75,10 @@ async def stream_subprocess(
     When ``liveness_timeout`` is set, the subprocess is killed and this
     generator returns if no stderr line arrives for that many seconds in a
     row. dsd-fme normally emits a sync line every ~60 ms, so a 60 s silence
-    almost always means a stuck child (PulseAudio dropped, SDRconnect
-    crashed, USB power dipped) — systemd ``Restart=on-failure`` then brings
-    us back. ``None`` disables the watchdog (the default, so existing
-    callers don't change behaviour).
+    almost always means a stuck child (audio/RF source dropped: PulseAudio
+    sink gone, SoapySDR / SDRplay API service hiccup, USB power dipped) —
+    systemd ``Restart=on-failure`` then brings us back. ``None`` disables
+    the watchdog (the default, so existing callers don't change behaviour).
     """
     proc = await asyncio.create_subprocess_exec(
         *args,

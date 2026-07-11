@@ -9,6 +9,46 @@ Versioning follows [Semantic Versioning](https://semver.org/):
 Source of truth: `backend/__init__.py` (`__version__`). The dashboard
 footer shows the running build's version and `/api/version` exposes it.
 
+## [0.23.0] — 2026-07-11
+
+SDRplay direct tuning — the RSP1B can now be driven straight from the
+monitor via SoapySDR, removing the manual SDRconnect GUI + virtual audio
+cable. First step toward the fully-automatic, multi-frequency capture in
+later phases.
+
+### Added
+
+- **`--rf-backend {pulse,soapy}`** (default `pulse` for backward
+  compatibility). With `soapy`, `dsd-fme` opens the SDRplay RSP directly
+  (`-i soapy:driver=sdrplay:<freq>:<gain>:<ppm>:<bw>`) and the monitor
+  tunes it from new flags: `--frequency` (Hz or `NNN.NM` MHz),
+  `--sdr-driver`, `--sdr-device-args`, `--gain`, `--ppm`,
+  `--bandwidth-khz`. No SDRconnect, no `dmr_capture` sink.
+- `build_dsd_command()` / `build_soapy_input()` / `normalize_frequency()`
+  — pure, unit-tested command construction (hardware not required);
+  startup fails fast with a clear message if `soapy` is selected without
+  a valid `--frequency`.
+- **`scripts/setup-sdrplay.sh`** — installs/verifies the SoapySDR
+  runtime, the SoapySDRPlay3 driver, and device discovery
+  (`SoapySDRUtil --find`), with exact instructions for the proprietary
+  SDRplay API service. `scripts/check_env.sh` now checks the SDR chain
+  (API service + SoapySDR device) instead of just SDRconnect;
+  `scripts/install-deps.sh` installs `soapysdr-tools`/`libsoapysdr-dev`.
+
+### Changed
+
+- `scripts/dmr-monitor.service` defaults to the `soapy` backend (with the
+  legacy pulse invocation kept as an inline comment); README pipeline
+  diagram documents both backends.
+
+### Notes
+
+- The exact SoapySDR arg string can differ between `dsd-fme` forks
+  (lwvmobile vs the newer dsd-neo) — verify against `dsd-fme -h` on the
+  target if a live spawn fails. The event schema already carries optional
+  `frequency`/`channel_label` (added in 0.20.0), so the upcoming
+  multi-frequency phase needs no further migration.
+
 ## [0.22.0] — 2026-07-11
 
 Day-based navigation — the collected history is now browsable and

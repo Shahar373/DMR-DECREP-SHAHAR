@@ -3,9 +3,21 @@
 Live monitoring of a Motorola Capacity Plus DMR system: who's talking, where
 they are, and what's happening on the trunked control / payload channels.
 
-Pipeline:
+Pipeline (two RF backends):
 ```
-SDR (RSP1B) → SDRconnect → PulseAudio loopback → dsd-fme → parser → state → UI
+# --rf-backend soapy (default going forward): direct SDR control, fully automatic
+SDR (RSP1B) → SDRplay API service → SoapySDR → dsd-fme → parser → state → UI
+
+# --rf-backend pulse (legacy): manual SDRconnect + virtual audio cable
+SDR (RSP1B) → SDRconnect (GUI, manual tune) → PulseAudio loopback → dsd-fme → …
+```
+
+The `soapy` backend lets `dsd-monitor` tune the RSP1B itself
+(`--frequency`), so there's no SDRconnect GUI and no virtual cable to set
+up. Run `bash scripts/setup-sdrplay.sh` once to install the chain, then:
+
+```bash
+python -m backend.cli --live --rf-backend soapy --frequency 168.5M --serve
 ```
 
 ## Status

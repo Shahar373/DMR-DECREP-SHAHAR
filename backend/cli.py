@@ -354,6 +354,65 @@ def _print_summary(state: StateManager) -> None:
             print(f"#   {rid:>6}  ({p.lat}, {p.lon})  at {p.at.strftime('%H:%M:%S')}")
 
 
+def normalize_frequency(value: str) -> str:
+    """Normalise a user frequency into dsd-fme's 'NNN.NNNM' MHz form.
+
+    Accepts plain Hz (``168500000``), MHz with an M suffix (``168.5M``),
+    or a bare small number treated as MHz (``168.5``). Raises ValueError
+    on garbage so the CLI can fail fast with a clear message.
+    """
+    s = str(value).strip()
+    if not s:
+        raise ValueError("empty frequency")
+    if s[-1] in ("M", "m"):
+        mhz = float(s[:-1])
+    else:
+        n = float(s)
+        # Heuristic: anything ≥ 10 000 is Hz, below that is MHz.
+        mhz = n / 1e6 if n >= 10_000 else n
+    if not (0.001 <= mhz <= 3000):
+        raise ValueError(f"frequency out of range: {value!r} → {mhz} MHz")
+    return f"{mhz:g}M"
+
+
+def build_soapy_input(args: argparse.Namespace) -> str:
+    """Build dsd-fme's SoapySDR input string.
+
+    Verified against dsd-neo's documented form
+    ``soapy[:args]:freq[:gain[:ppm[:bw]]]`` — e.g.
+    ``soapy:driver=sdrplay:168.5M:22:-2:24``. NOTE: the exact accepted
+    keys can differ between dsd-fme forks/builds; check ``dsd-fme -h``
+    on the target machine if the spawn fails.
+    """
+    device = f"driver={args.sdr_driver}"
+    if args.sdr_device_args:
+        device += f",{args.sdr_device_args}"
+    freq = normalize_frequency(args.frequency)
+    gain = f"{args.gain:g}"
+    return (
+        f"soapy:{device}:{freq}:{gain}:{args.ppm}:{args.bandwidth_khz}"
+    )
+
+
+def build_dsd_command(args: argparse.Namespace) -> list[str]:
+    """Assemble the dsd-fme spawn command. Pure — unit-testable without
+    hardware; the only inputs are parsed CLI args.
+
+    ``-fs`` = DMR/Cap+ decode; ``-7 <dir>`` must come BEFORE ``-P``
+    (per-call WAV recording) per the dsd-fme help.
+    """
+    if args.rf_backend == "soapy":
+        input_str = build_soapy_input(args)
+    else:
+        input_str = args.input
+    return [
+        args.dsd_bin, "-fs",
+        "-i", input_str,
+        "-7", str(Path(args.calls_dir)),
+        "-P",
+    ]
+
+
 def _parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     from . import __version__
     p = argparse.ArgumentParser(
@@ -373,9 +432,38 @@ def _parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
                            "automatically at startup when safe)")
 
     p.add_argument("--input", default="pulse:dmr_capture.monitor",
-                   help="dsd-fme -i input device (live mode, default: %(default)s)")
+                   help="dsd-fme -i input device when --rf-backend=pulse "
+                        "(live mode, default: %(default)s)")
     p.add_argument("--dsd-bin", default="dsd-fme",
                    help="path to dsd-fme binary (default: %(default)s)")
+
+    # ── RF backend (v0.23.0) ──────────────────────────────────────────
+    # 'pulse' is the legacy chain (SDRconnect GUI → virtual audio cable →
+    # dsd-fme). 'soapy' cuts both out: dsd-fme opens the SDRplay RSP
+    # directly through SoapySDR and tunes it from these flags.
+    p.add_argument("--rf-backend", choices=("pulse", "soapy"), default="pulse",
+                   help="how dsd-fme gets RF: 'pulse' = audio from the "
+                        "dmr_capture sink (legacy, needs SDRconnect); "
+                        "'soapy' = direct SDR control via SoapySDR "
+                        "(default: %(default)s)")
+    p.add_argument("--frequency", default=None,
+                   help="tune frequency for --rf-backend=soapy — Hz "
+                        "(e.g. 168500000) or MHz with an M suffix "
+                        "(e.g. 168.5M). Required with soapy.")
+    p.add_argument("--sdr-driver", default="sdrplay",
+                   help="SoapySDR driver name (default: %(default)s)")
+    p.add_argument("--sdr-device-args", default="",
+                   help="extra SoapySDR device args appended after the "
+                        "driver, e.g. 'serial=123456' (default: none)")
+    p.add_argument("--gain", type=float, default=0,
+                   help="tuner gain in dB for soapy (0 = driver auto, "
+                        "default: %(default)s)")
+    p.add_argument("--ppm", type=int, default=0,
+                   help="frequency correction in ppm for soapy "
+                        "(default: %(default)s)")
+    p.add_argument("--bandwidth-khz", type=int, default=24,
+                   help="channel bandwidth in kHz for soapy — 24 suits a "
+                        "12.5 kHz DMR channel (default: %(default)s)")
 
     p.add_argument("--snapshot", default="snapshot.json",
                    help="periodic JSON snapshot path (default: %(default)s)")
@@ -636,14 +724,8 @@ async def _run(args: argparse.Namespace) -> None:
 
     if args.live:
         # dsd-fme writes per-call WAVs to --calls-dir via `-7 <dir> -P`.
-        # `-7` must come BEFORE `-P` per the dsd-fme help.
         calls_dir.mkdir(parents=True, exist_ok=True)
-        cmd = [
-            args.dsd_bin, "-fs",
-            "-i", args.input,
-            "-7", str(calls_dir),
-            "-P",
-        ]
+        cmd = build_dsd_command(args)
         print(f"# starting: {' '.join(cmd)}", file=sys.stderr)
         liveness = args.liveness_timeout if args.liveness_timeout > 0 else None
         # _with_retry keeps the asyncio loop alive across dsd-fme stalls.
@@ -754,6 +836,19 @@ def main(argv: Optional[list[str]] = None) -> None:
             file=sys.stderr,
         )
         sys.exit(2)
+    if getattr(args, "live", False) and args.rf_backend == "soapy":
+        if not args.frequency:
+            print(
+                "# FATAL: --rf-backend soapy requires --frequency "
+                "(e.g. --frequency 168.5M).",
+                file=sys.stderr,
+            )
+            sys.exit(2)
+        try:
+            normalize_frequency(args.frequency)
+        except ValueError as exc:
+            print(f"# FATAL: bad --frequency: {exc}", file=sys.stderr)
+            sys.exit(2)
     if getattr(args, "rebuild_index", False):
         sys.exit(_rebuild_index(args))
     if getattr(args, "migrate_jsonl", False):
