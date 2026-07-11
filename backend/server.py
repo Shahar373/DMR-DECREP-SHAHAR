@@ -503,6 +503,28 @@ async def history_csv(
     )
 
 
+@app.get("/api/stats/day/{day}")
+async def stats_for_day(day: str):
+    """Historical statistics for one local day, shaped like /api/stats so
+    the stats page reuses its chart rendering. 404 for an empty day."""
+    from .event_log import compute_quality_ratios
+    from .export import is_valid_day
+
+    if not is_valid_day(day):
+        raise HTTPException(status_code=422, detail="day must be YYYY-MM-DD")
+    idx = _prefer_index()
+    if idx is None:
+        raise HTTPException(status_code=404, detail="no event index")
+    data = await _run_heavy(idx.day_stats, day)
+    if data["window_size"] == 0:
+        raise HTTPException(status_code=404, detail=f"no events on {day}")
+    data["quality_ratios"] = compute_quality_ratios(
+        data["events_by_type"], data["quality_by_kind"],
+    )
+    data["day"] = day
+    return data
+
+
 @app.get("/api/days")
 async def list_days():
     """Days with recorded data — drives the UI day picker and tells the

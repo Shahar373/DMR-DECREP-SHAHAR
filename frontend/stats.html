@@ -96,6 +96,8 @@ main { padding: 16px; display: grid; gap: 16px;
   <h1>DMR Cap+ Statistics</h1>
   <nav class="nav" data-shared-nav></nav>
   <div class="meta">
+    <span id="day-picker" style="display:inline-flex;gap:4px;margin-right:12px;vertical-align:middle"></span>
+    <span id="m-mode" style="color:var(--blue)">live (in-memory window)</span> ·
     Window: <span id="m-window">—</span> events ·
     First: <span id="m-first">—</span> ·
     Last: <span id="m-last">—</span> ·
@@ -168,14 +170,21 @@ main { padding: 16px; display: grid; gap: 16px;
 <script>
 const PALETTE = ['#58a6ff','#3fb950','#d29922','#f85149','#bc8cff',
                  '#ff7b72','#79c0ff','#56d364','#e3b341','#a371f7'];
-Chart.defaults.color = '#8b949e';
-Chart.defaults.borderColor = '#30363d';
-Chart.defaults.font.family = "ui-monospace, monospace";
-Chart.defaults.font.size = 11;
+// Chart.js comes from a CDN — on an offline Pi (or a flaky proxy) it may
+// not load. Degrade gracefully: tables/quality/day-picker keep working,
+// only the canvases stay empty.
+const HAS_CHART = typeof Chart !== 'undefined';
+if (HAS_CHART) {
+  Chart.defaults.color = '#8b949e';
+  Chart.defaults.borderColor = '#30363d';
+  Chart.defaults.font.family = "ui-monospace, monospace";
+  Chart.defaults.font.size = 11;
+}
 
 const charts = {};
 
 function makeBar(canvasId, opts = {}) {
+  if (!HAS_CHART) return null;
   const ctx = document.getElementById(canvasId).getContext('2d');
   return new Chart(ctx, {
     type: 'bar',
@@ -193,6 +202,7 @@ function makeBar(canvasId, opts = {}) {
 }
 
 function makeDoughnut(canvasId) {
+  if (!HAS_CHART) return null;
   const ctx = document.getElementById(canvasId).getContext('2d');
   return new Chart(ctx, {
     type: 'doughnut',
@@ -205,6 +215,7 @@ function makeDoughnut(canvasId) {
 }
 
 function update(chart, labels, values, color) {
+  if (!chart) return;
   chart.data.labels = labels;
   chart.data.datasets[0].data = values;
   if (color) chart.data.datasets[0].backgroundColor = color;
@@ -321,19 +332,41 @@ async function refreshQuality() {
 
 document.getElementById('q-window').addEventListener('change', refreshQuality);
 
+let currentDay = '';   // '' = live; 'YYYY-MM-DD' = historical day view
+
 async function refresh() {
   let s;
+  const dayMode = !!currentDay;
   try {
-    const r = await fetch('/api/stats');
-    if (!r.ok) return;
+    const url = dayMode ? `/api/stats/day/${currentDay}` : '/api/stats';
+    const r = await fetch(url);
+    if (!r.ok) {
+      if (dayMode) {
+        document.getElementById('m-window').textContent = 'no data';
+      }
+      return;
+    }
     s = await r.json();
   } catch (_) { return; }
 
-  // Quality has its own window-aware endpoint; trigger that too.
-  refreshQuality();
+  document.getElementById('m-mode').textContent =
+    dayMode ? `day ${currentDay}` : 'live (in-memory window)';
+
+  if (dayMode) {
+    // A day payload carries its own quality ratios (whole-day sample);
+    // the rolling-window selector applies to live mode only.
+    renderQuality(Object.assign({}, s.quality_ratios, {
+      sample_events: s.window_size,
+      window_start: s.first_event_at,
+      window_end: s.last_event_at,
+    }));
+  } else {
+    // Quality has its own window-aware endpoint; trigger that too.
+    refreshQuality();
+  }
 
   document.getElementById('m-window').textContent =
-    `${s.window_size}/${s.window_capacity}`;
+    dayMode ? String(s.window_size) : `${s.window_size}/${s.window_capacity}`;
   document.getElementById('m-first').textContent = fmtTs(s.first_event_at);
   document.getElementById('m-last').textContent  = fmtTs(s.last_event_at);
 
@@ -372,8 +405,19 @@ async function refresh() {
 
 // Version tag comes from /assets/shared.js.
 
+// Day picker (shared.js) — switches between live polling and a static
+// historical-day view (no auto-refresh needed for a finished day).
+document.addEventListener('DOMContentLoaded', () => {
+  if (window.DMRShared) {
+    DMRShared.createDayPicker(document.getElementById('day-picker'), day => {
+      currentDay = day || '';
+      refresh();
+    });
+  }
+});
+
 refresh();
-setInterval(refresh, 5000);
+setInterval(() => { if (!currentDay) refresh(); }, 5000);
 </script>
 </body>
 </html>

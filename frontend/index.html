@@ -1152,6 +1152,12 @@ async function openDossier(id) {
 
 function renderDossier(d) {
   const fmtTs = s => s ? String(s).split('.')[0].replace('T', ' ') : '—';
+  // Timestamps deep-link into the Debrief day view for that date.
+  const dayLink = s => s
+    ? `<a href="/debrief?day=${String(s).slice(0, 10)}"
+          style="color:inherit;text-decoration:underline dotted"
+          title="Open this day in Debrief">${fmtTs(s)}</a>`
+    : '—';
   document.getElementById('d-title').textContent = `Radio ${d.id}`;
   document.getElementById('d-ip').textContent = d.ip || '—';
 
@@ -1191,8 +1197,8 @@ function renderDossier(d) {
   document.getElementById('d-body').innerHTML = `
     <section>
       <div class="stats-grid">
-        <div class="stat"><div class="k">first seen</div><div class="v">${fmtTs(d.first_seen)}</div></div>
-        <div class="stat"><div class="k">last seen</div><div class="v">${fmtTs(d.last_seen)}</div></div>
+        <div class="stat"><div class="k">first seen</div><div class="v">${dayLink(d.first_seen)}</div></div>
+        <div class="stat"><div class="k">last seen</div><div class="v">${dayLink(d.last_seen)}</div></div>
         <div class="stat"><div class="k">total calls</div><div class="v">${d.total_calls}</div></div>
         <div class="stat"><div class="k">enc events on used slots</div><div class="v">${d.encrypted_calls}</div></div>
       </div>

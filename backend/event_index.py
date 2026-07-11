@@ -615,6 +615,76 @@ class EventIndex:
             for r in rows
         ]
 
+    def day_stats(self, day: str) -> dict:
+        """Aggregates for one local day, shaped like ``EventLog.stats()``
+        so the stats page reuses its chart code for historical days.
+
+        Semantics note: ``calls_by_src`` / ``calls_by_tg`` count voice
+        FRAMES here (SQL GROUP BY), not distinct keyups like the live
+        ring-buffer stats — relative proportions are what the charts
+        show, and those are preserved.
+        """
+        def _grouped(sql: str, params: tuple) -> dict:
+            return {
+                str(row[0]): int(row[1])
+                for row in self._conn.execute(sql, params)
+                if row[0] is not None
+            }
+
+        with self._lock:
+            self._commit_locked()
+            by_type = _grouped(
+                "SELECT type, COUNT(*) FROM events WHERE day=? GROUP BY type",
+                (day,),
+            )
+            calls_by_src = _grouped(
+                "SELECT src, COUNT(*) FROM events WHERE day=? AND "
+                "type='voice_call' AND src > 0 GROUP BY src "
+                "ORDER BY COUNT(*) DESC LIMIT 20",
+                (day,),
+            )
+            calls_by_tg = _grouped(
+                "SELECT tgt, COUNT(*) FROM events WHERE day=? AND "
+                "type='voice_call' AND src > 0 GROUP BY tgt "
+                "ORDER BY COUNT(*) DESC LIMIT 20",
+                (day,),
+            )
+            positions_by_src = _grouped(
+                "SELECT src, COUNT(*) FROM events WHERE day=? AND "
+                "type='lrrp_position' GROUP BY src "
+                "ORDER BY COUNT(*) DESC LIMIT 20",
+                (day,),
+            )
+            quality_by_kind = _grouped(
+                "SELECT error_type, COUNT(*) FROM events WHERE day=? AND "
+                "type='quality' GROUP BY error_type",
+                (day,),
+            )
+            # Same key shape as EventLog.stats(): "YYYY-MM-DD HH:00".
+            hourly = _grouped(
+                "SELECT substr(ts, 1, 10) || ' ' || substr(ts, 12, 2) || ':00', "
+                "COUNT(*) FROM events WHERE day=? GROUP BY 1 ORDER BY 1",
+                (day,),
+            )
+            row = self._conn.execute(
+                "SELECT COUNT(*), MIN(ts), MAX(ts) FROM events WHERE day=?",
+                (day,),
+            ).fetchone()
+        total = int(row[0]) if row else 0
+        return {
+            "window_size": total,
+            "window_capacity": total,
+            "first_event_at": row[1] if row else None,
+            "last_event_at": row[2] if row else None,
+            "events_by_type": by_type,
+            "calls_by_src": calls_by_src,
+            "calls_by_tg": calls_by_tg,
+            "positions_by_src": positions_by_src,
+            "hourly": hourly,
+            "encrypted_calls": by_type.get("encryption", 0),
+            "quality_by_kind": quality_by_kind,
+        }
+
     def prune_days_older_than(
         self, cutoff_day: str, chunk_size: int = 50_000,
     ) -> int:

@@ -90,6 +90,20 @@
   header { position: relative; }
 }
 
+/* ── Day picker (shared.js createDayPicker) ────────────────────────── */
+
+.day-picker, .day-step {
+  background: var(--bg3);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 4px 8px;
+  font-family: inherit;
+  font-size: var(--fs-sm);
+  cursor: pointer;
+}
+.day-step:hover, .day-picker:hover { border-color: var(--blue); color: var(--blue); }
+
 /* ── Touch targets ─────────────────────────────────────────────────── */
 
 @media (pointer: coarse) {

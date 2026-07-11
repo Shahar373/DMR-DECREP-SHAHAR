@@ -114,6 +114,10 @@ tr:hover td { background: var(--bg3); }
 
 <form id="filters" onsubmit="event.preventDefault(); resetAndSearch();">
   <div class="f-group">
+    <label>Day</label>
+    <div id="day-picker" style="display:flex;gap:4px"></div>
+  </div>
+  <div class="f-group">
     <label for="f-from">From</label>
     <input id="f-from" type="datetime-local" step="1">
   </div>
@@ -155,7 +159,9 @@ tr:hover td { background: var(--bg3); }
   </div>
   <div class="f-actions">
     <button type="button" class="btn" id="btn-clear">Clear</button>
-    <button type="button" class="btn" id="btn-csv">⤓ Export CSV</button>
+    <button type="button" class="btn" id="btn-csv">⤓ CSV</button>
+    <button type="button" class="btn" id="btn-ndjson" style="display:none"
+            title="Raw NDJSON of the selected day">⤓ NDJSON</button>
     <button type="submit" class="btn primary">Search</button>
   </div>
 </form>
@@ -212,16 +218,32 @@ const els = {
 };
 let currentOffset = 0;
 let currentTruncated = false;
+let currentDay = '';   // '' = live/all; 'YYYY-MM-DD' = historical day view
 
 function buildQuery(extra = {}) {
   const p = new URLSearchParams();
-  if (els.from.value)  p.set('since', els.from.value);
-  if (els.to.value)    p.set('until', els.to.value);
+  if (currentDay) {
+    // Day view: the day bound replaces the free-form time range.
+    p.set('day', currentDay);
+  } else {
+    if (els.from.value)  p.set('since', els.from.value);
+    if (els.to.value)    p.set('until', els.to.value);
+  }
   if (els.src.value)   p.set('src', els.src.value);
   if (els.tgt.value)   p.set('tgt', els.tgt.value);
   if (els.types.value) p.set('types', els.types.value);
   for (const [k, v] of Object.entries(extra)) p.set(k, v);
   return p.toString();
+}
+
+function _setDayMode(day) {
+  currentDay = day || '';
+  const dayMode = !!currentDay;
+  // Time-range inputs don't apply in day view.
+  els.from.disabled = dayMode;
+  els.to.disabled = dayMode;
+  document.getElementById('btn-ndjson').style.display = dayMode ? '' : 'none';
+  resetAndSearch();
 }
 
 function describe(ev) {
@@ -340,7 +362,31 @@ document.getElementById('btn-clear').addEventListener('click', () => {
   resetAndSearch();
 });
 document.getElementById('btn-csv').addEventListener('click', () => {
+  if (currentDay) {
+    // Day view: the structured export endpoint (streams from SQLite).
+    const p = new URLSearchParams({ day: currentDay, format: 'csv' });
+    if (els.src.value)   p.set('src', els.src.value);
+    if (els.tgt.value)   p.set('tgt', els.tgt.value);
+    if (els.types.value) p.set('types', els.types.value);
+    window.location.href = '/api/export?' + p.toString();
+    return;
+  }
   window.location.href = '/api/history.csv?' + buildQuery();
+});
+document.getElementById('btn-ndjson').addEventListener('click', () => {
+  if (!currentDay) return;
+  // Unfiltered single-day NDJSON streams the raw day file byte-for-byte.
+  window.location.href = '/api/export?' +
+    new URLSearchParams({ day: currentDay, format: 'ndjson' }).toString();
+});
+
+// Day picker (shared.js) — deferred scripts have run by DOMContentLoaded.
+document.addEventListener('DOMContentLoaded', () => {
+  if (window.DMRShared) {
+    DMRShared.createDayPicker(
+      document.getElementById('day-picker'), _setDayMode,
+    );
+  }
 });
 els.prev.addEventListener('click', () => {
   const limit = parseInt(els.limit.value, 10);

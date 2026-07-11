@@ -113,3 +113,29 @@ def test_history_csv_day_filter(day_client):
     r = client.get("/api/history.csv?day=2026-07-11")
     lines = r.text.strip().splitlines()
     assert len(lines) == 4  # header + 3
+
+
+# ── /api/stats/day/{day} ─────────────────────────────────────────────
+
+
+def test_stats_day_shape_matches_live_stats(day_client):
+    client, _, _ = day_client
+    s = client.get("/api/stats/day/2026-07-10").json()
+    assert s["day"] == "2026-07-10"
+    assert s["window_size"] == 5
+    assert s["events_by_type"] == {"voice_call": 4, "quality": 1}
+    assert s["calls_by_src"] == {"101": 4}
+    assert s["calls_by_tg"] == {"9": 4}
+    assert s["quality_by_kind"] == {"CSBK_CRC": 1}
+    assert s["first_event_at"].startswith("2026-07-10T22:00:00")
+    # Hourly buckets keyed like the live stats ("YYYY-MM-DD HH:00").
+    assert s["hourly"] == {"2026-07-10 22:00": 5}
+    # Quality ratios computed server-side, same shape as /api/quality.
+    assert "overall" in s["quality_ratios"]
+    assert s["quality_ratios"]["overall"]["errors"] == 1
+
+
+def test_stats_day_404_on_empty_day(day_client):
+    client, _, _ = day_client
+    assert client.get("/api/stats/day/2026-01-01").status_code == 404
+    assert client.get("/api/stats/day/bogus").status_code == 422

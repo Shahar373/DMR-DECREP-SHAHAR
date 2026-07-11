@@ -9,6 +9,36 @@ Versioning follows [Semantic Versioning](https://semver.org/):
 Source of truth: `backend/__init__.py` (`__version__`). The dashboard
 footer shows the running build's version and `/api/version` exposes it.
 
+## [0.22.0] — 2026-07-11
+
+Day-based navigation — the collected history is now browsable and
+exportable by day from the UI, with linkable URLs.
+
+### Added
+
+- **Day picker** (shared component, `◀ [Today — live / recorded days] ▶`
+  fed by `/api/days`) on the Debrief and Stats pages. The selected day
+  lives in the URL (`?day=YYYY-MM-DD`) so day views are shareable links;
+  deep links auto-select the day on load.
+- **Debrief day view**: picking a day queries `/api/history?day=` with
+  real pagination, disables the free-form time range, and exposes
+  per-day export buttons — CSV via `/api/export` and raw NDJSON (the
+  day file itself, byte-for-byte).
+- **`GET /api/stats/day/{day}`** — whole-day statistics shaped exactly
+  like `/api/stats` (per-type counts, top talkers/talkgroups, hourly
+  buckets, quality ratios computed over the full day) so the Stats page
+  reuses its chart rendering unchanged. Live mode is now explicitly
+  labeled "live (in-memory window)" vs "day YYYY-MM-DD"; historical days
+  don't auto-refresh.
+- Dossier `first_seen`/`last_seen` timestamps deep-link into the Debrief
+  day view for that date.
+
+### Fixed
+
+- The Stats page no longer dies entirely when the Chart.js CDN is
+  unreachable (offline Pi / proxy hiccup) — charts stay empty but the
+  quality analyzer, tables, and day navigation keep working.
+
 ## [0.21.0] — 2026-07-11
 
 Responsive frontend foundation — the five dashboard pages now adapt to
