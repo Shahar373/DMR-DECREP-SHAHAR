@@ -9,6 +9,39 @@ Versioning follows [Semantic Versioning](https://semver.org/):
 Source of truth: `backend/__init__.py` (`__version__`). The dashboard
 footer shows the running build's version and `/api/version` exposes it.
 
+## [0.25.0] — 2026-07-12
+
+Automatic traffic-following — with more channels than the Pi can decode
+at once, only put a decoder where there's actually traffic. Answers
+"can it automatically move to where the traffic is?"
+
+### Added
+
+- **`backend/rf/scheduler.py`** — `TrafficScheduler` decides, moment to
+  moment, which channel labels deserve a live decoder:
+  - control channels are always decoded (they carry the grants);
+  - a decoded event on a channel, or a control-channel grant
+    (`LSN_STATUS` Active / `BANK_CALL` `lsn_to_tg`) mapped through the
+    channel plan's LSN→frequency table, keeps that channel active for a
+    `hang_seconds` window so a decoder doesn't drop mid-transmission;
+  - `--follow-traffic` wires it into the capture pump so idle channels are
+    skipped; `max_active` caps concurrent decoders (control + freshest);
+  - decisions use the event clock, so replay tracks the log's own time.
+- **`backend/rf/energy.py`** — FFT per-channel power detection as the
+  fallback signal (activate a channel carrying RF before a grant is even
+  decoded). Synthetic-IQ tested: a tone localises to its channel.
+- **`--follow-traffic`** CLI flag (multi-frequency mode).
+
+### Notes
+
+- The scheduler and energy detector are pure/unit-tested (18 tests incl.
+  an end-to-end run of real parsed events through the multiplex into the
+  scheduler); their integration into the live capture pump is the same
+  hardware path as Phase 7. When the whole plan fits in the RSP and the
+  Pi can decode every channel, `--follow-traffic` is unnecessary — you're
+  already listening everywhere and traffic just appears; it's the
+  CPU-budget lever for larger plans.
+
 ## [0.24.0] — 2026-07-12
 
 Multi-frequency capture — decode several Capacity Plus channels at once

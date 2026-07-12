@@ -20,6 +20,24 @@ up. Run `bash scripts/setup-sdrplay.sh` once to install the chain, then:
 python -m backend.cli --live --rf-backend soapy --frequency 168.5M --serve
 ```
 
+### Multi-frequency capture (one RSP, several channels at once)
+
+If the site's Cap+ channels all fit within one RSP's ~10 MHz, a single
+wideband capture is channelized in software and each channel is decoded
+in parallel. Describe the channels in a JSON plan (see
+`backend/channel_plan.py`) and pass `--channel-plan`:
+
+```bash
+python -m backend.cli --live --channel-plan site.json --serve
+# only decode channels that are actually active (saves CPU):
+python -m backend.cli --live --channel-plan site.json --follow-traffic --serve
+```
+
+`--follow-traffic` keeps a decoder only on the control channel plus
+channels the control-channel grants (or RF energy) show as active — the
+system "goes where the traffic is" instead of decoding every channel all
+the time. Each event, radio, and call is tagged with its channel.
+
 ## Status
 
 | Phase | Status | What works |
