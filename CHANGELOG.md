@@ -9,6 +9,59 @@ Versioning follows [Semantic Versioning](https://semver.org/):
 Source of truth: `backend/__init__.py` (`__version__`). The dashboard
 footer shows the running build's version and `/api/version` exposes it.
 
+## [0.26.0] — 2026-07-12
+
+Live SDR control from the dashboard — the operator can now retune
+frequency/gain/ppm/bandwidth and start/stop live decoding from the
+browser, with changes persisted across restarts. First half of "manage
+the whole thing from the UI"; multi-frequency channel-plan editing
+follows in 0.27.0.
+
+### Added
+
+- **📡 SDR panel** on the live dashboard: shows current backend/frequency/
+  live-status, a form to retune (frequency, gain, ppm, bandwidth, and
+  switching between `soapy`/`pulse` backends), and a Start/Stop Live
+  toggle. Applying a retune restarts the dsd-fme child with the new
+  tuning — a brief (~1-3s) gap in decoding, same as any dsd-fme restart.
+- **`GET /api/sdr/status`**, **`POST /api/sdr/tune`**, **`POST
+  /api/sdr/live`** — no auth by default (matches `/api/snapshot`'s open
+  posture, per the operator's explicit choice); if `--reset-token` is
+  configured, the same token also gates these (a retune is as
+  real-world-effecting as a reset).
+- **`--sdr-config`** (default `sdr_runtime.json`) — the current tuning
+  persists here and is authoritative on the next restart; a service
+  restart no longer needs `--frequency` re-specified once the operator
+  has tuned it once from the UI. Seeded from the CLI flags on first run.
+- `backend/rf/control.py` (`RfRuntimeConfig`, `RfController`) — validated
+  mutation + persistence + retune/pause signalling, pure and unit-tested
+  (14 tests) independent of any subprocess machinery.
+- `wrapper.stream_subprocess_with_retry` gained `interrupt_event`
+  (terminates the current child and forces an immediate respawn — used
+  for retunes, distinct from `stop_event`'s permanent shutdown) and now
+  accepts a cmd **factory** in addition to a fixed list, so a respawn
+  picks up whatever tuning changed since the last spawn. Verified with a
+  fake dsd-fme binary that echoes its own argv: two consecutive UI
+  retunes each produced a correctly-tuned respawn, pausing produced zero
+  spawns, and resuming picked up the latest tuning — all through the real
+  asyncio subprocess path, not mocked.
+- `backend/dsd_command.py` — `normalize_frequency`/`build_soapy_input`/
+  `build_dsd_command` moved out of `cli.py` (still re-exported from
+  there) so the RF controller can build commands without a circular
+  import; behavior unchanged.
+
+### Fixed
+
+- **`index.html` no longer crashes its entire script when the Leaflet
+  CDN is unreachable.** `const map = L.map(...)` was the first line of
+  the inline script with no guard — on a blocked/offline network (a real
+  scenario for this project: a Pi at a monitoring site) it threw
+  immediately and silently killed every other feature below it (radios
+  table, calls, debrief, and this release's SDR panel). Guarded like the
+  existing Chart.js fallback in `stats.html`; the map area now shows
+  "Map unavailable" and everything else keeps working. Caught while
+  browser-testing this release against a network that blocks `unpkg.com`.
+
 ## [0.25.0] — 2026-07-12
 
 Automatic traffic-following — with more channels than the Pi can decode
