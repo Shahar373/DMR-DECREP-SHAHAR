@@ -26,12 +26,29 @@ def test_page_serves_and_references_shared_assets(client, path):
     assert 'name="viewport"' in r.text
 
 
+@pytest.mark.parametrize("path", PAGES)
+def test_page_declares_dark_color_scheme(client, path):
+    """Regression test: without an explicit color-scheme, some browsers'
+    "auto dark theme" heuristic (notably Android Chrome) re-inverts an
+    already-dark page on top of our own CSS — most visibly leaving
+    <table>/<select>/<input> at light browser defaults (white bg, black
+    text) while divs with explicit backgrounds render correctly dark,
+    producing a half-themed page. The <meta color-scheme> tag opts every
+    page out of that heuristic; style.css's :root also sets the CSS
+    property as a second layer (covers the moment before the meta tag /
+    stylesheet is parsed)."""
+    html = client.get(path).text
+    assert 'name="color-scheme"' in html
+    assert 'content="dark"' in html
+
+
 def test_style_css_served_with_css_mime(client):
     r = client.get("/assets/style.css")
     assert r.status_code == 200
     assert "text/css" in r.headers["content-type"]
     # Design tokens present.
     assert "--bg:" in r.text
+    assert "color-scheme: dark" in r.text
 
 
 def test_shared_js_served(client):

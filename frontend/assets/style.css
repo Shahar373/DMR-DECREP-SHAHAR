@@ -13,6 +13,17 @@
  */
 
 :root {
+  /* Tells the browser this page is INTENTIONALLY dark, so it doesn't
+   * apply its own "auto dark theme" heuristic on top of ours. Without
+   * this, browsers that force-invert light-looking pages (Android
+   * Chrome's system dark mode is the common case) can partially fight
+   * our CSS — most visibly on <table>/<select>/<input>, which browser
+   * auto-dark implementations deliberately leave at light UA defaults
+   * to avoid breaking legacy table-based layouts, producing a page
+   * that's dark everywhere except the radios table and form controls.
+   */
+  color-scheme: dark;
+
   /* Color tokens — the historical dark palette, named semantically. */
   --bg: #0d1117;
   --bg2: #161b22;
