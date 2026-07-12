@@ -9,6 +9,24 @@ Versioning follows [Semantic Versioning](https://semver.org/):
 Source of truth: `backend/__init__.py` (`__version__`). The dashboard
 footer shows the running build's version and `/api/version` exposes it.
 
+## [0.26.1] — 2026-07-12
+
+### Fixed
+
+- **Dashboard rendering half-inverted on browsers with "auto dark theme"**
+  (reported live from the field: table + map area stayed white while the
+  header/sidebar were correctly dark). Root cause: browsers that
+  force-apply their own dark-mode heuristic to pages without an explicit
+  color scheme (Android Chrome's system dark mode is the common case)
+  deliberately leave `<table>`/`<select>`/`<input>` at light UA defaults
+  to avoid breaking legacy table-based layouts — producing a page that's
+  dark everywhere our CSS sets an explicit background, but reverts to
+  white-on-black-text for the radios table and form controls. Fixed by
+  declaring `color-scheme: dark` (both as a `<meta>` tag on every page
+  and as a CSS property in the shared `:root`), which tells the browser
+  the page already has its own deliberate dark theme and opts it out of
+  the auto-dark heuristic entirely.
+
 ## [0.26.0] — 2026-07-12
 
 Live SDR control from the dashboard — the operator can now retune
