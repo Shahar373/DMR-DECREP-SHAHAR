@@ -206,6 +206,96 @@ def test_stream_subprocess_with_retry_respawns_on_liveness_timeout():
     assert "second\n" in lines
 
 
+def test_stream_subprocess_with_retry_accepts_cmd_factory():
+    """Live SDR retuning (0.26.0): passing a callable instead of a fixed
+    list means every respawn re-reads whatever the caller last set —
+    proven here by mutating a closure variable between spawns and
+    checking the spawned child's argv reflects the change."""
+    import sys as _sys
+
+    from backend.wrapper import stream_subprocess_with_retry
+
+    tuning = {"freq": "168.5M"}
+
+    def cmd_factory():
+        # Echo our own last argv to stderr, then exit immediately — the
+        # retry loop respawns on every EOF, so each spawn's argv is
+        # observable as one line.
+        return [
+            _sys.executable, "-c",
+            "import sys; sys.stderr.write(sys.argv[1] + '\\n'); sys.stderr.flush()",
+            tuning["freq"],
+        ]
+
+    async def go():
+        stop = asyncio.Event()
+        gen = stream_subprocess_with_retry(
+            cmd_factory, stop_event=stop, backoff_seconds=0.05,
+        )
+        seen = []
+        async for line in gen:
+            seen.append(line.strip())
+            if len(seen) == 1:
+                tuning["freq"] = "435M"  # simulate a UI retune mid-stream
+            elif len(seen) >= 2:
+                stop.set()
+                break
+        return seen
+
+    seen = asyncio.run(go())
+    assert seen[0] == "168.5M"
+    assert seen[-1] == "435M"
+
+
+def test_stream_subprocess_with_retry_interrupt_event_forces_immediate_respawn():
+    """interrupt_event terminates the current (long-running) child and
+    respawns with a fresh cmd — without waiting for the full
+    backoff_seconds used for genuine stalls, and without ending the
+    stream the way stop_event would."""
+    import sys as _sys
+
+    from backend.wrapper import stream_subprocess_with_retry
+
+    tuning = {"freq": "168.5M"}
+
+    def cmd_factory():
+        # Prints its argv once, then sleeps "forever" (must be killed by
+        # the interrupt, not by natural exit).
+        return [
+            _sys.executable, "-c",
+            "import sys, time; sys.stderr.write(sys.argv[1] + '\\n'); "
+            "sys.stderr.flush(); time.sleep(30)",
+            tuning["freq"],
+        ]
+
+    async def go():
+        stop = asyncio.Event()
+        interrupt = asyncio.Event()
+        gen = stream_subprocess_with_retry(
+            cmd_factory, stop_event=stop, interrupt_event=interrupt,
+            backoff_seconds=5.0,          # a natural stall would be slow...
+            retune_backoff_seconds=0.05,  # ...but a retune must be fast.
+        )
+        seen = []
+        start = asyncio.get_event_loop().time()
+        async for line in gen:
+            seen.append(line.strip())
+            if len(seen) == 1:
+                tuning["freq"] = "435M"
+                interrupt.set()
+            elif len(seen) >= 2:
+                stop.set()
+                break
+        elapsed = asyncio.get_event_loop().time() - start
+        return seen, elapsed
+
+    seen, elapsed = asyncio.run(go())
+    assert seen == ["168.5M", "435M"]
+    # Proves retune_backoff_seconds (0.05s) was used, not backoff_seconds
+    # (5s) — generous margin for CI jitter, still far under a real stall.
+    assert elapsed < 3.0
+
+
 def test_stream_subprocess_with_retry_honours_stop_event():
     """Setting stop_event should make the wrapper exit cleanly without
     spawning another child, even mid-stream."""

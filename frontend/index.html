@@ -313,6 +313,33 @@ tr.has-gps { cursor: pointer; }
 .dossier-panel .recording-row:last-child { border-bottom: none; }
 .dossier-panel .recording-row .meta { display: flex; justify-content: space-between; }
 
+/* SDR control panel form (reuses .dossier-panel shell) */
+#sdr-body label { display: block; color: var(--muted); font-size: 10px;
+                  text-transform: uppercase; letter-spacing: .05em;
+                  margin: 10px 0 3px; }
+#sdr-body input, #sdr-body select {
+  width: 100%; background: var(--bg3); color: var(--text);
+  border: 1px solid var(--border); border-radius: 4px;
+  padding: 6px 8px; font-family: inherit; font-size: 13px;
+}
+#sdr-body .btn {
+  background: var(--bg3); color: var(--text); border: 1px solid var(--border);
+  border-radius: 4px; padding: 7px 12px; font-family: inherit; font-size: 12px;
+  cursor: pointer; margin-top: 10px; width: 100%;
+}
+#sdr-body .btn:hover { border-color: var(--blue); color: var(--blue); }
+#sdr-body .btn.live-on  { border-color: var(--green); color: var(--green); }
+#sdr-body .btn.live-off { border-color: var(--red);   color: var(--red); }
+#sdr-body .btn:disabled { opacity: .5; cursor: not-allowed; }
+#sdr-body .sdr-badge {
+  display: inline-block; padding: 2px 8px; border-radius: 3px;
+  font-size: 11px; font-weight: 700; border: 1px solid;
+}
+#sdr-body .sdr-badge.on  { color: var(--green); border-color: var(--green); }
+#sdr-body .sdr-badge.off { color: var(--muted); border-color: var(--border); }
+#sdr-body .sdr-err { color: var(--red); font-size: 11px; margin-top: 8px; }
+#sdr-body .sdr-ok  { color: var(--green); font-size: 11px; margin-top: 8px; }
+
 /* ── Alerts toast bar ──────────────────────────────────────────────── */
 #toast-bar {
   position: fixed; top: 56px; right: 14px; z-index: 2000;
@@ -382,6 +409,7 @@ tr.has-gps { cursor: pointer; }
       <option value="3600">last 1h</option>
     </select>
   </div>
+  <button id="sdr-open" class="header-ctrl" title="SDR control — frequency, gain, live on/off">📡 SDR</button>
   <button id="export-csv" class="header-ctrl" title="Download all buffered events as CSV">⤓ Export CSV</button>
   <button id="reset-data" class="header-ctrl" title="Clear all accumulated data and start fresh" style="color:#f66">↺ Reset</button>
   <div id="conn" class="wait">Connecting…</div>
@@ -486,13 +514,37 @@ tr.has-gps { cursor: pointer; }
   </div>
 </aside>
 
+<!-- SDR control slide-in panel (Phase 9) -->
+<div id="sdr-backdrop" class="dossier-backdrop"></div>
+<aside id="sdr-panel" class="dossier-panel" aria-hidden="true">
+  <div class="dh">
+    <div><h2>SDR Control</h2></div>
+    <button class="dclose" onclick="closeSdrPanel()">close</button>
+  </div>
+  <div id="sdr-body">
+    <section class="muted">Loading…</section>
+  </div>
+</aside>
+
 <script>
 // ── Map setup ─────────────────────────────────────────────────────
-const map = L.map('map', { zoomControl: true }).setView([32.08, 34.80], 12);
-L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-  attribution: '© OpenStreetMap',
-  maxZoom: 18,
-}).addTo(map);
+// Leaflet loads from a CDN — an offline Pi (or a blocked/flaky network,
+// which is exactly the kind of environment this monitor runs in) means
+// `L` may never be defined. Without this guard the very first line here
+// throws and the ENTIRE dashboard script dies silently — not just the
+// map, but the radios table, calls, debrief, and the SDR panel too.
+// Degrade instead: skip map features, everything else keeps working.
+const HAS_LEAFLET = typeof L !== 'undefined';
+const map = HAS_LEAFLET ? L.map('map', { zoomControl: true }).setView([32.08, 34.80], 12) : null;
+if (HAS_LEAFLET) {
+  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+    attribution: '© OpenStreetMap',
+    maxZoom: 18,
+  }).addTo(map);
+} else {
+  const ph = document.getElementById('map-placeholder');
+  if (ph) { ph.textContent = 'Map unavailable — Leaflet failed to load (offline?)'; ph.style.display = ''; }
+}
 
 const radioMarkers = {};  // radio_id → L.Marker
 const radioTrails  = {};  // radio_id → L.Polyline
@@ -536,6 +588,7 @@ function selectRadio(id) {
 }
 
 function updateMap(snapshot) {
+  if (!HAS_LEAFLET) return;  // placeholder text already explains why
   const refTime = snapshot.generated_at ? new Date(snapshot.generated_at).getTime() : Date.now();
   const hasVisiblePos = Object.values(snapshot.radios)
     .some(r => r.last_position && !isStale(r, refTime));
@@ -624,6 +677,12 @@ function fmt(ts) {
   if (!ts) return '—';
   const d = new Date(ts);
   return d.toLocaleTimeString('en-GB', { hour12: false });
+}
+
+function escapeHTML(s) {
+  return String(s ?? '').replace(/[&<>"']/g, c => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+  }[c]));
 }
 
 function renderLSN(snap) {
@@ -864,7 +923,7 @@ async function _pollFallback() {
 setInterval(_pollFallback, 2000);
 
 // Keep the map from going stale when window is resized.
-window.addEventListener('resize', () => map.invalidateSize());
+window.addEventListener('resize', () => { if (map) map.invalidateSize(); });
 
 // ── Recent call history ────────────────────────────────────────────
 const histAudio = document.getElementById('hist-audio-el');
@@ -1017,6 +1076,152 @@ document.getElementById('reset-data').addEventListener('click', async () => {
     alert('Reset error: ' + e.message);
   }
 });
+
+// ── SDR control panel (Phase 9) ──────────────────────────────────────
+// Reuses the --reset-token secret (if the operator configured one) for
+// tune/live requests too — a retune is as real-world-effecting as a
+// reset. Cached after the first successful prompt so repeat actions in
+// the same session don't re-prompt.
+let _sdrToken = null;
+
+async function sdrFetch(url, opts = {}) {
+  const headers = Object.assign({}, opts.headers || {});
+  if (_sdrToken) headers['X-Reset-Token'] = _sdrToken;
+  let r = await fetch(url, Object.assign({}, opts, { headers }));
+  if (r.status === 403) {
+    const token = prompt('SDR control requires a token (server --reset-token):');
+    if (!token) return r;
+    _sdrToken = token;
+    r = await fetch(url, Object.assign({}, opts, { headers: Object.assign({}, headers, { 'X-Reset-Token': token }) }));
+  }
+  return r;
+}
+
+function fmtMhz(freqStr) {
+  if (!freqStr) return '—';
+  const m = String(freqStr).match(/^([\d.]+)M$/i);
+  return m ? `${m[1]} MHz` : freqStr;
+}
+
+function renderSdrPanel(status) {
+  const body = document.getElementById('sdr-body');
+  if (status.mode === 'unavailable') {
+    body.innerHTML = `<section class="muted">${escapeHTML(status.message || 'Not available in this mode.')}</section>`;
+    return;
+  }
+  const live = !!status.live_enabled;
+  const isSoapy = status.rf_backend === 'soapy';
+  body.innerHTML = `
+    <section>
+      <div class="row"><span>Live</span><span class="sdr-badge ${live ? 'on' : 'off'}">${live ? 'LIVE' : 'STOPPED'}</span></div>
+      <div class="row"><span>Backend</span><span>${escapeHTML(status.rf_backend)}</span></div>
+      ${isSoapy ? `<div class="row"><span>Frequency</span><span>${escapeHTML(fmtMhz(status.frequency))}</span></div>` : ''}
+      ${status.last_error ? `<div class="sdr-err">${escapeHTML(status.last_error)}</div>` : ''}
+      ${!status.soapy_available ? '<div class="muted" style="font-size:10px;margin-top:6px">⚠ SoapySDR not detected on this host — retuning needs the SDR chain set up first (scripts/setup-sdrplay.sh).</div>' : ''}
+    </section>
+    <section>
+      <h3>Backend</h3>
+      <label for="sdr-backend-sel">RF backend</label>
+      <select id="sdr-backend-sel">
+        <option value="soapy" ${isSoapy ? 'selected' : ''}>soapy — direct SDR control</option>
+        <option value="pulse" ${!isSoapy ? 'selected' : ''}>pulse — SDRconnect / virtual cable (legacy)</option>
+      </select>
+    </section>
+    <section id="sdr-soapy-fields" style="${isSoapy ? '' : 'display:none'}">
+      <h3>Tuning</h3>
+      <label for="sdr-freq">Frequency (e.g. 168.5M, or Hz)</label>
+      <input id="sdr-freq" type="text" value="${escapeHTML(status.frequency || '')}" placeholder="168.5M">
+      <label for="sdr-gain">Gain (dB, 0 = auto)</label>
+      <input id="sdr-gain" type="number" step="1" value="${status.gain ?? 0}">
+      <label for="sdr-ppm">PPM correction</label>
+      <input id="sdr-ppm" type="number" step="1" value="${status.ppm ?? 0}">
+      <label for="sdr-bw">Bandwidth (kHz)</label>
+      <input id="sdr-bw" type="number" step="1" value="${status.bandwidth_khz ?? 24}">
+    </section>
+    <section id="sdr-pulse-fields" style="${isSoapy ? 'display:none' : ''}">
+      <label for="sdr-input">Pulse input device</label>
+      <input id="sdr-input" type="text" value="${escapeHTML(status.input || 'pulse:dmr_capture.monitor')}">
+    </section>
+    <section>
+      <button id="sdr-apply" class="btn">Apply${isSoapy ? ' (~1-3s decode gap)' : ''}</button>
+      <button id="sdr-toggle" class="btn ${live ? 'live-off' : 'live-on'}">${live ? '⏸ Stop Live' : '▶ Start Live'}</button>
+      <div id="sdr-msg"></div>
+    </section>
+  `;
+
+  document.getElementById('sdr-backend-sel').addEventListener('change', (e) => {
+    const soapy = e.target.value === 'soapy';
+    document.getElementById('sdr-soapy-fields').style.display = soapy ? '' : 'none';
+    document.getElementById('sdr-pulse-fields').style.display = soapy ? 'none' : '';
+  });
+
+  document.getElementById('sdr-apply').addEventListener('click', async () => {
+    const backend = document.getElementById('sdr-backend-sel').value;
+    const payload = { rf_backend: backend };
+    if (backend === 'soapy') {
+      payload.frequency = document.getElementById('sdr-freq').value.trim();
+      payload.gain = parseFloat(document.getElementById('sdr-gain').value) || 0;
+      payload.ppm = parseInt(document.getElementById('sdr-ppm').value, 10) || 0;
+      payload.bandwidth_khz = parseInt(document.getElementById('sdr-bw').value, 10) || 24;
+    } else {
+      payload.input = document.getElementById('sdr-input').value.trim();
+    }
+    const msg = document.getElementById('sdr-msg');
+    msg.textContent = 'Applying…'; msg.className = '';
+    try {
+      const r = await sdrFetch('/api/sdr/tune', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      const data = await r.json();
+      if (!r.ok) {
+        msg.textContent = data.detail || `Error ${r.status}`;
+        msg.className = 'sdr-err';
+        return;
+      }
+      renderSdrPanel(Object.assign({}, data, { mode: 'single', soapy_available: status.soapy_available }));
+    } catch (e) {
+      msg.textContent = 'Network error: ' + e.message;
+      msg.className = 'sdr-err';
+    }
+  });
+
+  document.getElementById('sdr-toggle').addEventListener('click', async () => {
+    try {
+      const r = await sdrFetch('/api/sdr/live', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ enabled: !live }),
+      });
+      const data = await r.json();
+      if (r.ok) {
+        renderSdrPanel(Object.assign({}, data, { mode: 'single', soapy_available: status.soapy_available }));
+      }
+    } catch (e) { /* swallow — panel just stays as-is */ }
+  });
+}
+
+async function openSdrPanel() {
+  document.getElementById('sdr-backdrop').classList.add('open');
+  const panel = document.getElementById('sdr-panel');
+  panel.classList.add('open');
+  panel.setAttribute('aria-hidden', 'false');
+  document.getElementById('sdr-body').innerHTML = '<section class="muted">Loading…</section>';
+  try {
+    const r = await fetch('/api/sdr/status');
+    renderSdrPanel(await r.json());
+  } catch (e) {
+    document.getElementById('sdr-body').innerHTML =
+      `<section class="muted">Error: ${escapeHTML(e.message)}</section>`;
+  }
+}
+function closeSdrPanel() {
+  document.getElementById('sdr-backdrop').classList.remove('open');
+  const panel = document.getElementById('sdr-panel');
+  panel.classList.remove('open');
+  panel.setAttribute('aria-hidden', 'true');
+}
+document.getElementById('sdr-open').addEventListener('click', openSdrPanel);
+document.getElementById('sdr-backdrop').addEventListener('click', closeSdrPanel);
 
 // ── Session uptime clock ───────────────────────────────────────────
 const _bootAt = Date.now();
@@ -1236,6 +1441,10 @@ function renderDossier(d) {
     const el = document.getElementById('d-map');
     if (!el) return;
     if (_dossierMap) { _dossierMap.remove(); _dossierMap = null; }
+    if (!HAS_LEAFLET) {
+      el.innerHTML = '<div class="muted" style="padding:8px">Map unavailable — Leaflet failed to load.</div>';
+      return;
+    }
     if (positions.length === 0) {
       el.innerHTML = '<div class="muted" style="padding:8px">No GPS positions in window.</div>';
       return;

@@ -123,6 +123,18 @@ def attach_reset_token(token: Optional[str]) -> None:
     _reset_token = token or None
 
 
+# Live SDR control (Phase 9). None in replay mode or multi-frequency
+# (--channel-plan) mode — /api/sdr/* reports that explicitly rather than
+# 404ing, so the UI can render a clear "not available in this mode"
+# state instead of a generic error.
+_rf_control = None
+
+
+def attach_rf_control(controller) -> None:
+    global _rf_control
+    _rf_control = controller
+
+
 def note_voice_event(ts: datetime) -> None:
     """Bump the last-voice-seen marker (called by the wrapper on each
     voice_call event so /api/health can answer "are radios actually
@@ -265,6 +277,85 @@ def _debug_info_sync() -> dict:
 @app.get("/api/version")
 async def get_version():
     return {"version": __version__, "build_date": __build_date__}
+
+
+# ── Live SDR control (Phase 9) ───────────────────────────────────────
+# No auth by default (matches /api/snapshot's posture) — the operator
+# explicitly chose an open dashboard on a private network over adding a
+# second token. Reuses --reset-token if one is configured, since a
+# retune is a real-world action worth the same protection as a reset
+# when the operator has opted into that.
+
+def _require_sdr_auth(request: Request, x_reset_token: Optional[str]) -> None:
+    if _reset_token is not None:
+        if x_reset_token != _reset_token:
+            raise HTTPException(status_code=403, detail="invalid or missing X-Reset-Token header")
+        return
+    # No token configured: same posture as /api/snapshot — open.
+
+
+@app.get("/api/sdr/status")
+async def sdr_status():
+    from .rf.capture import soapy_available
+    if _rf_control is None:
+        return {
+            "mode": "unavailable",
+            "message": "Live SDR control isn't wired up for this run — "
+                       "either replay mode (no hardware involved) or "
+                       "--channel-plan (multi-frequency) mode, which "
+                       "manages its own channels; see /api/sdr/channel-plan.",
+            "soapy_available": soapy_available(),
+        }
+    status = _rf_control.status()
+    status["mode"] = "single"
+    status["soapy_available"] = soapy_available()
+    return status
+
+
+@app.post("/api/sdr/tune")
+async def sdr_tune(
+    payload: dict,
+    request: Request,
+    x_reset_token: Optional[str] = Header(None),
+):
+    """Change frequency/gain/ppm/bandwidth/backend. Applies on the next
+    dsd-fme spawn — a brief (~1-3s) gap in decoding while it restarts
+    with the new tuning."""
+    if _rf_control is None:
+        raise HTTPException(
+            status_code=409,
+            detail="live SDR control isn't available in this run mode "
+                   "(replay, or --channel-plan multi-frequency mode)",
+        )
+    _require_sdr_auth(request, x_reset_token)
+    allowed = {"rf_backend", "input", "frequency", "sdr_driver",
+              "sdr_device_args", "gain", "ppm", "bandwidth_khz"}
+    unknown = set(payload) - allowed
+    if unknown:
+        raise HTTPException(status_code=422, detail=f"unknown field(s): {sorted(unknown)}")
+    try:
+        return _rf_control.set_tuning(**{k: payload[k] for k in payload if k in allowed})
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@app.post("/api/sdr/live")
+async def sdr_live(
+    payload: dict,
+    request: Request,
+    x_reset_token: Optional[str] = Header(None),
+):
+    """Start/stop the dsd-fme child without restarting the service."""
+    if _rf_control is None:
+        raise HTTPException(
+            status_code=409,
+            detail="live SDR control isn't available in this run mode "
+                   "(replay, or --channel-plan multi-frequency mode)",
+        )
+    _require_sdr_auth(request, x_reset_token)
+    if "enabled" not in payload or not isinstance(payload["enabled"], bool):
+        raise HTTPException(status_code=422, detail="body must be {\"enabled\": true|false}")
+    return _rf_control.set_live_enabled(payload["enabled"])
 
 
 @app.get("/api/health")

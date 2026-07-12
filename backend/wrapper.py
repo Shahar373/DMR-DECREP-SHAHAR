@@ -16,7 +16,7 @@ from __future__ import annotations
 import asyncio
 import sys
 from collections.abc import AsyncIterator, Callable
-from typing import Optional
+from typing import Optional, Union
 
 from .event_log import EventLog
 from .models import Event
@@ -73,6 +73,7 @@ async def stream_subprocess(
     stop_event: Optional[asyncio.Event] = None,
     env: Optional[dict] = None,
     liveness_timeout: Optional[float] = None,
+    interrupt_event: Optional[asyncio.Event] = None,
 ) -> AsyncIterator[str]:
     """Spawn a subprocess and yield its stderr line by line.
 
@@ -87,6 +88,14 @@ async def stream_subprocess(
     sink gone, SoapySDR / SDRplay API service hiccup, USB power dipped) —
     systemd ``Restart=on-failure`` then brings us back. ``None`` disables
     the watchdog (the default, so existing callers don't change behaviour).
+
+    ``interrupt_event`` (0.26.0) terminates the child exactly like
+    ``stop_event`` but is a distinct signal — it's how live SDR retuning
+    (a changed frequency/gain/etc.) asks the current child to exit so
+    ``stream_subprocess_with_retry`` can respawn it with fresh tuning,
+    without treating the whole stream as finished the way ``stop_event``
+    does. This generator itself doesn't care which fired; it's the
+    caller's job to tell them apart afterward via ``.is_set()``.
     """
     proc = await asyncio.create_subprocess_exec(
         *args,
@@ -98,9 +107,16 @@ async def stream_subprocess(
         raise RuntimeError("failed to capture subprocess stderr")
 
     async def _terminate_on_stop() -> None:
-        if stop_event is None:
+        waits = [e.wait() for e in (stop_event, interrupt_event) if e is not None]
+        if not waits:
             return
-        await stop_event.wait()
+        tasks = [asyncio.ensure_future(w) for w in waits]
+        try:
+            await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+        finally:
+            for t in tasks:
+                if not t.done():
+                    t.cancel()
         if proc.returncode is None:
             proc.terminate()
 
@@ -165,11 +181,13 @@ async def stream_file(
 
 
 async def stream_subprocess_with_retry(
-    args: list[str],
+    args: Union[list[str], Callable[[], list[str]]],
     stop_event: Optional[asyncio.Event] = None,
     env: Optional[dict] = None,
     liveness_timeout: Optional[float] = None,
     backoff_seconds: float = 2.0,
+    interrupt_event: Optional[asyncio.Event] = None,
+    retune_backoff_seconds: float = 0.2,
 ) -> AsyncIterator[str]:
     """Like ``stream_subprocess`` but respawns the child instead of
     bubbling the timeout to the top of the process.
@@ -191,15 +209,29 @@ async def stream_subprocess_with_retry(
 
     ``stop_event`` is honoured before every restart attempt so a clean
     shutdown still tears down promptly.
+
+    Live SDR retuning (0.26.0): ``args`` may be a zero-arg callable
+    instead of a fixed list — it's re-invoked on every spawn, so a caller
+    that mutates the underlying tuning between spawns (e.g. via
+    ``RfController``) gets a fresh command each time without restarting
+    this generator. ``interrupt_event`` terminates the current child (like
+    ``stop_event``, but doesn't end the stream) — pass a caller-owned
+    event, ``.set()`` it after changing the tuning, and the next line
+    onward comes from a freshly spawned child. Retune respawns use the
+    short ``retune_backoff_seconds`` instead of the full ``backoff_seconds``
+    (which is sized for genuine stalls, not an operator-requested change).
     """
     while True:
         if stop_event is not None and stop_event.is_set():
             return
+        cmd = args() if callable(args) else args
         restart_reason: Optional[str] = None
+        was_interrupt = False
         try:
             async for line in stream_subprocess(
-                args, stop_event=stop_event, env=env,
+                cmd, stop_event=stop_event, env=env,
                 liveness_timeout=liveness_timeout,
+                interrupt_event=interrupt_event,
             ):
                 yield line
         except RuntimeError as exc:
@@ -213,14 +245,19 @@ async def stream_subprocess_with_retry(
             # operator can see exactly which binary failed and why.
             restart_reason = f"could not spawn child ({exc})"
         else:
-            restart_reason = "child exited (EOF)"
+            if interrupt_event is not None and interrupt_event.is_set():
+                interrupt_event.clear()
+                was_interrupt = True
+                restart_reason = "retuned"
+            else:
+                restart_reason = "child exited (EOF)"
         if stop_event is not None and stop_event.is_set():
             return
         print(
-            f"# wrapper: restarting child after stall — {restart_reason}",
+            f"# wrapper: restarting child — {restart_reason}",
             file=sys.stderr,
         )
         try:
-            await asyncio.sleep(backoff_seconds)
+            await asyncio.sleep(retune_backoff_seconds if was_interrupt else backoff_seconds)
         except asyncio.CancelledError:
             return

@@ -22,9 +22,17 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
+from .dsd_command import build_dsd_command, build_soapy_input, normalize_frequency
 from .models import Event, EventType
 from .state import StateManager, atomic_write_text
 from .wrapper import LineRunner, stream_file, stream_subprocess_with_retry
+
+__all__ = [
+    "main",
+    "build_dsd_command",
+    "build_soapy_input",
+    "normalize_frequency",
+]
 
 
 # Events that are worth showing live. The control-channel "heartbeat" events
@@ -354,63 +362,70 @@ def _print_summary(state: StateManager) -> None:
             print(f"#   {rid:>6}  ({p.lat}, {p.lon})  at {p.at.strftime('%H:%M:%S')}")
 
 
-def normalize_frequency(value: str) -> str:
-    """Normalise a user frequency into dsd-fme's 'NNN.NNNM' MHz form.
+async def _wait_first(*events: asyncio.Event) -> None:
+    """Return as soon as any of ``events`` is set."""
+    tasks = [asyncio.ensure_future(e.wait()) for e in events]
+    try:
+        await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+    finally:
+        for t in tasks:
+            if not t.done():
+                t.cancel()
 
-    Accepts plain Hz (``168500000``), MHz with an M suffix (``168.5M``),
-    or a bare small number treated as MHz (``168.5``). Raises ValueError
-    on garbage so the CLI can fail fast with a clear message.
+
+async def _run_single_channel_supervisor(
+    runner: LineRunner,
+    controller,  # RfController — typed loosely to avoid a module-level rf import
+    base_args: argparse.Namespace,
+    stop_event: asyncio.Event,
+    liveness: Optional[float],
+) -> None:
+    """Live single-channel loop that can be retuned or paused/resumed
+    from the UI (0.26.0) without restarting the whole process.
+
+    Reuses ``stream_subprocess_with_retry`` unchanged for the actual
+    respawn machinery (natural stalls AND UI-triggered retunes both go
+    through it — the difference is which event fired). Pausing
+    (``live_enabled=False``) is implemented as a *session-scoped* stop
+    event: ending one "live session" cleanly and, when resumed, starting
+    a fresh one — the outer ``stop_event`` (process shutdown) is layered
+    on top and always wins.
     """
-    s = str(value).strip()
-    if not s:
-        raise ValueError("empty frequency")
-    if s[-1] in ("M", "m"):
-        mhz = float(s[:-1])
-    else:
-        n = float(s)
-        # Heuristic: anything ≥ 10 000 is Hz, below that is MHz.
-        mhz = n / 1e6 if n >= 10_000 else n
-    if not (0.001 <= mhz <= 3000):
-        raise ValueError(f"frequency out of range: {value!r} → {mhz} MHz")
-    return f"{mhz:g}M"
+    while not stop_event.is_set():
+        if not controller.config.live_enabled:
+            controller.live_toggle_event.clear()
+            await _wait_first(controller.live_toggle_event, stop_event)
+            continue
+        controller.live_toggle_event.clear()
 
+        def cmd_factory(_controller=controller, _base=base_args):
+            return build_dsd_command(_controller.apply_to_args(_base))
 
-def build_soapy_input(args: argparse.Namespace) -> str:
-    """Build dsd-fme's SoapySDR input string.
+        # A retune requested while paused (nobody was consuming
+        # retune_event as an interrupt signal) must not trigger an
+        # immediate, pointless respawn now — the fresh spawn below
+        # already reflects the latest tuning.
+        controller.retune_event.clear()
+        print(f"# starting: {' '.join(cmd_factory())}", file=sys.stderr)
+        session_stop = asyncio.Event()
 
-    Verified against dsd-neo's documented form
-    ``soapy[:args]:freq[:gain[:ppm[:bw]]]`` — e.g.
-    ``soapy:driver=sdrplay:168.5M:22:-2:24``. NOTE: the exact accepted
-    keys can differ between dsd-fme forks/builds; check ``dsd-fme -h``
-    on the target machine if the spawn fails.
-    """
-    device = f"driver={args.sdr_driver}"
-    if args.sdr_device_args:
-        device += f",{args.sdr_device_args}"
-    freq = normalize_frequency(args.frequency)
-    gain = f"{args.gain:g}"
-    return (
-        f"soapy:{device}:{freq}:{gain}:{args.ppm}:{args.bandwidth_khz}"
-    )
+        async def _watch_pause_or_shutdown(_session_stop=session_stop):
+            await _wait_first(controller.live_toggle_event, stop_event)
+            _session_stop.set()
 
-
-def build_dsd_command(args: argparse.Namespace) -> list[str]:
-    """Assemble the dsd-fme spawn command. Pure — unit-testable without
-    hardware; the only inputs are parsed CLI args.
-
-    ``-fs`` = DMR/Cap+ decode; ``-7 <dir>`` must come BEFORE ``-P``
-    (per-call WAV recording) per the dsd-fme help.
-    """
-    if args.rf_backend == "soapy":
-        input_str = build_soapy_input(args)
-    else:
-        input_str = args.input
-    return [
-        args.dsd_bin, "-fs",
-        "-i", input_str,
-        "-7", str(Path(args.calls_dir)),
-        "-P",
-    ]
+        watcher = asyncio.create_task(_watch_pause_or_shutdown())
+        source = stream_subprocess_with_retry(
+            cmd_factory, stop_event=session_stop, liveness_timeout=liveness,
+            interrupt_event=controller.retune_event,
+        )
+        try:
+            await runner.consume_lines(source)
+        finally:
+            watcher.cancel()
+            try:
+                await watcher
+            except (asyncio.CancelledError, Exception):  # noqa: BLE001
+                pass
 
 
 async def _run_multichannel_live(  # pragma: no cover - needs an RSP + SoapySDR
@@ -561,6 +576,13 @@ def _parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
                         "active (control-channel grants + energy), to save "
                         "CPU when channels outnumber the CPU budget")
 
+    # ── Live SDR control (Phase 9) ────────────────────────────────────
+    p.add_argument("--sdr-config", default="sdr_runtime.json",
+                   help="single-channel RF tuning state, UI-editable and "
+                        "persisted across restarts — seeded from "
+                        "--rf-backend/--frequency/--gain/--ppm/etc. on "
+                        "first run, authoritative after (default: %(default)s)")
+
     p.add_argument("--snapshot", default="snapshot.json",
                    help="periodic JSON snapshot path (default: %(default)s)")
     p.add_argument("--snapshot-interval", type=float, default=1.0,
@@ -699,6 +721,27 @@ async def _run(args: argparse.Namespace) -> None:
     if primed:
         print(f"# primed event buffer with {primed} events from JSONL", file=sys.stderr)
 
+    # ── Live SDR control (0.26.0) ──────────────────────────────────────
+    # Single-channel tuning is UI-controllable and persists across
+    # restarts. Multi-frequency (--channel-plan) mode isn't wired to the
+    # controller yet — Phase 10 covers live channel-plan editing.
+    rf_controller = None
+    if args.live and not args.channel_plan:
+        from .rf.control import RfController, RfRuntimeConfig, load_or_seed_rf_config
+        seed = RfRuntimeConfig(
+            rf_backend=args.rf_backend, input=args.input, frequency=args.frequency,
+            sdr_driver=args.sdr_driver, sdr_device_args=args.sdr_device_args,
+            gain=args.gain, ppm=args.ppm, bandwidth_khz=args.bandwidth_khz,
+            live_enabled=True,
+        )
+        rf_config = load_or_seed_rf_config(Path(args.sdr_config), seed)
+        rf_controller = RfController(rf_config, Path(args.sdr_config))
+        print(
+            f"# sdr control: {rf_config.rf_backend} backend, "
+            f"frequency={rf_config.frequency}, config at {args.sdr_config}",
+            file=sys.stderr,
+        )
+
     # ── Alerts Engine ────────────────────────────────────────────────
     evaluator = None
     if args.alerts_rules:
@@ -755,6 +798,7 @@ async def _run(args: argparse.Namespace) -> None:
         srv.attach_evaluator(evaluator)
         srv.attach_reset_token(args.reset_token)
         srv.set_dev_reload_html(args.dev_reload_html)
+        srv.attach_rf_control(rf_controller)
         config = uvicorn.Config(
             srv.app,
             host="0.0.0.0",
@@ -830,19 +874,16 @@ async def _run(args: argparse.Namespace) -> None:
     elif args.live:
         # dsd-fme writes per-call WAVs to --calls-dir via `-7 <dir> -P`.
         calls_dir.mkdir(parents=True, exist_ok=True)
-        cmd = build_dsd_command(args)
-        print(f"# starting: {' '.join(cmd)}", file=sys.stderr)
         liveness = args.liveness_timeout if args.liveness_timeout > 0 else None
-        # _with_retry keeps the asyncio loop alive across dsd-fme stalls.
-        # The watchdog still fires after `liveness_timeout` seconds of
-        # silence — but instead of crashing the whole service (and making
-        # systemd restart everything, which blacks out the dashboard for
-        # ~10s), we just respawn the child and the rest of the process
-        # carries on. The CLI flag default (60s) stays unchanged.
-        source = stream_subprocess_with_retry(
-            cmd, stop_event=stop_event, liveness_timeout=liveness,
+        # The supervisor wraps stream_subprocess_with_retry (which already
+        # keeps the asyncio loop alive across natural stalls — the
+        # dashboard doesn't go dark for a systemd-restart cycle) with live
+        # retune/pause support driven by rf_controller (0.26.0): the UI
+        # can change frequency/gain/ppm or pause/resume without touching
+        # the rest of the process.
+        consume = _run_single_channel_supervisor(
+            runner, rf_controller, args, stop_event, liveness,
         )
-        consume = runner.consume_lines(source)
     else:
         print(f"# replaying {args.replay} (delay={args.replay_delay}s)", file=sys.stderr)
         source = stream_file(args.replay, delay=args.replay_delay, stop_event=stop_event)
@@ -965,18 +1006,35 @@ def main(argv: Optional[list[str]] = None) -> None:
             )
             sys.exit(2)
     elif getattr(args, "live", False) and args.rf_backend == "soapy":
-        if not args.frequency:
+        # A frequency set earlier via the UI (persisted to --sdr-config)
+        # is just as valid as one passed on the command line — a service
+        # restart shouldn't require re-adding --frequency once the
+        # operator has tuned it once.
+        has_persisted_freq = False
+        sdr_config_path = Path(args.sdr_config)
+        if sdr_config_path.exists():
+            try:
+                from .rf.control import RfRuntimeConfig
+                persisted = RfRuntimeConfig.model_validate_json(
+                    sdr_config_path.read_text(encoding="utf-8")
+                )
+                has_persisted_freq = bool(persisted.frequency)
+            except Exception:  # noqa: BLE001 — corrupt file just means "no help here"
+                has_persisted_freq = False
+        if not args.frequency and not has_persisted_freq:
             print(
                 "# FATAL: --rf-backend soapy requires --frequency "
-                "(e.g. --frequency 168.5M).",
+                "(e.g. --frequency 168.5M) — or a previously-tuned "
+                f"{args.sdr_config}.",
                 file=sys.stderr,
             )
             sys.exit(2)
-        try:
-            normalize_frequency(args.frequency)
-        except ValueError as exc:
-            print(f"# FATAL: bad --frequency: {exc}", file=sys.stderr)
-            sys.exit(2)
+        if args.frequency:
+            try:
+                normalize_frequency(args.frequency)
+            except ValueError as exc:
+                print(f"# FATAL: bad --frequency: {exc}", file=sys.stderr)
+                sys.exit(2)
     if getattr(args, "rebuild_index", False):
         sys.exit(_rebuild_index(args))
     if getattr(args, "migrate_jsonl", False):

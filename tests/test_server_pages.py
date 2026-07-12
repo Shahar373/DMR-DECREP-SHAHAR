@@ -46,3 +46,18 @@ def test_no_page_hardcodes_its_own_nav_links(client):
     for path in PAGES:
         html = client.get(path).text
         assert '<a href="/debrief">Debrief</a>' not in html, path
+
+
+def test_index_guards_missing_leaflet():
+    """A CDN outage (offline Pi, blocked network — a real deployment
+    scenario for this project) must not crash the whole dashboard script.
+    Regression test for the pre-9.0 bug where `const map = L.map(...)`
+    was the first line of the inline script with no guard: if Leaflet
+    failed to load, every feature below it (radios table, calls, debrief,
+    the SDR panel) silently died along with the map."""
+    client = TestClient(srv.app)
+    html = client.get("/").text
+    assert "HAS_LEAFLET" in html
+    assert "typeof L !== 'undefined'" in html
+    # The very first executable line must not unconditionally dereference L.
+    assert "const map = L.map(" not in html
