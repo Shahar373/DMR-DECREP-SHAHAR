@@ -94,6 +94,10 @@ class Radio(BaseModel):
     last_position: Optional[Position] = None
     # Recent positions for drawing a movement trail on the map; capped to N.
     position_history: list[Position] = Field(default_factory=list)
+    # RF channel this radio was last heard on (multi-frequency mode);
+    # None in single-channel mode. Additive.
+    last_channel: Optional[str] = None
+    last_frequency: Optional[float] = None
 
 
 class ActiveCall(BaseModel):
@@ -109,6 +113,9 @@ class ActiveCall(BaseModel):
     frame_count: int = 1
     is_encrypted: bool = False
     rest_lsn: Optional[int] = None
+    # RF channel this call is on (multi-frequency mode); None single-channel.
+    channel_label: Optional[str] = None
+    frequency: Optional[float] = None
 
 
 class LSNStateSnapshot(BaseModel):
@@ -137,7 +144,10 @@ class DashboardSnapshot(BaseModel):
     """JSON-serializable view of the entire dashboard state."""
 
     radios: dict[int, Radio]
-    active_calls: dict[int, ActiveCall]
+    # Keyed by slot (single-channel, int) or "<channel>:<slot>" (multi-
+    # frequency). Typed str so both coexist; JSON keys were always strings
+    # anyway, so the wire format is unchanged for single-channel clients.
+    active_calls: dict[str, ActiveCall]
     system: SystemStatus
     quality: QualityCounters
     generated_at: datetime
@@ -177,6 +187,11 @@ class StateManager:
         self._last_event_at: Optional[datetime] = None
         self._on_call_start = on_call_start
         self._on_call_end = on_call_end
+        # Channel context of the event currently being applied (multi-
+        # frequency mode). Captured in apply() so per-event handlers can
+        # stamp radios/calls without threading it through every signature.
+        self._cur_channel_label: Optional[str] = None
+        self._cur_frequency: Optional[float] = None
         # Trim policy for broadcast (WS / /api/snapshot) payloads — the
         # persisted snapshot.json always uses the full, untrimmed view.
         self._broadcast_max_radios = broadcast_max_radios
@@ -194,6 +209,9 @@ class StateManager:
     def apply(self, event: Event) -> None:
         self.quality.total_events_seen += 1
         self._last_event_at = event.timestamp
+        # Channel context for the handlers (None in single-channel mode).
+        self._cur_channel_label = getattr(event, "channel_label", None)
+        self._cur_frequency = getattr(event, "frequency", None)
 
         # Auto-tick BEFORE the handler so a voice frame arriving after a long
         # gap sees the stale call as already expired and starts a fresh one
@@ -277,7 +295,11 @@ class StateManager:
                 radios[rid] = radio
         return DashboardSnapshot(
             radios=radios,
-            active_calls=dict(self.active_calls),
+            # Internal keys are bare int slots (single-channel) or
+            # "<channel>:<slot>" strings (multi-frequency); stringify so
+            # both fit the str-keyed field. Wire format is unchanged
+            # (JSON keys were always strings).
+            active_calls={str(k): v for k, v in self.active_calls.items()},
             system=self.system,
             quality=self.quality,
             generated_at=self._last_event_at or datetime.now(),
@@ -333,6 +355,14 @@ class StateManager:
 
     # --- helpers ---
 
+    def _call_key(self, slot: int):
+        """Active-call dict key: the bare slot (int) in single-channel mode
+        so nothing changes, or ``"<channel>:<slot>"`` when a channel is set,
+        so two frequencies' slot-1 calls don't collide."""
+        if self._cur_channel_label is None:
+            return slot
+        return f"{self._cur_channel_label}:{slot}"
+
     def _touch_radio(self, radio_id: int, ts: datetime) -> Radio:
         radio = self.radios.get(radio_id)
         if radio is None:
@@ -343,6 +373,9 @@ class StateManager:
         else:
             if ts > radio.last_seen:
                 radio.last_seen = ts
+        if self._cur_channel_label is not None:
+            radio.last_channel = self._cur_channel_label
+            radio.last_frequency = self._cur_frequency
         return radio
 
     def _evict_radios(self) -> None:
@@ -391,7 +424,8 @@ class StateManager:
         radio.last_tg = ev.tgt
         radio.last_slot = ev.slot
 
-        existing = self.active_calls.get(ev.slot)
+        key = self._call_key(ev.slot)
+        existing = self.active_calls.get(key)
         if existing is not None and existing.src == ev.src and existing.tgt == ev.tgt:
             existing.last_frame_at = ev.timestamp
             existing.frame_count += 1
@@ -415,8 +449,10 @@ class StateManager:
                 started_at=ev.timestamp,
                 last_frame_at=ev.timestamp,
                 rest_lsn=ev.rest_lsn,
+                channel_label=self._cur_channel_label,
+                frequency=self._cur_frequency,
             )
-            self.active_calls[ev.slot] = new_call
+            self.active_calls[key] = new_call
             if self._on_call_start is not None:
                 try:
                     self._on_call_start(new_call)
@@ -451,7 +487,7 @@ class StateManager:
         self._touch_radio(ev.tgt, ev.timestamp)
 
     def _on_encryption(self, ev: EncryptionEvent) -> None:
-        call = self.active_calls.get(ev.slot)
+        call = self.active_calls.get(self._call_key(ev.slot))
         if call is not None:
             call.is_encrypted = True
             radio = self.radios.get(call.src)

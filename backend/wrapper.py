@@ -32,12 +32,17 @@ class LineRunner:
         state: StateManager,
         on_event: Optional[Callable[[Event], None]] = None,
         event_log: Optional[EventLog] = None,
+        channel=None,
     ) -> None:
         self.state = state
         self.on_event = on_event
         self.event_log = event_log
         self.parser = DSDLogParser()
         self._stop = asyncio.Event()
+        # Optional channel_plan.Channel — when set, every parsed event is
+        # stamped with this channel's label + frequency (multi-frequency
+        # mode). None → single-channel, events carry no channel tag.
+        self.channel = channel
 
     async def consume_lines(self, line_iter: AsyncIterator[str]) -> None:
         async for line in line_iter:
@@ -46,6 +51,9 @@ class LineRunner:
             ev = self.parser.parse_line(line)
             if ev is None:
                 continue
+            if self.channel is not None:
+                ev.channel_label = self.channel.label
+                ev.frequency = self.channel.frequency_hz
             self.state.apply(ev)
             if self.event_log is not None:
                 self.event_log.append(ev)

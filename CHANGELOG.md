@@ -9,6 +9,49 @@ Versioning follows [Semantic Versioning](https://semver.org/):
 Source of truth: `backend/__init__.py` (`__version__`). The dashboard
 footer shows the running build's version and `/api/version` exposes it.
 
+## [0.24.0] — 2026-07-12
+
+Multi-frequency capture — decode several Capacity Plus channels at once
+from a single wideband RSP1B capture, instead of one dsd-fme on one
+frequency. Answers "can we listen to several frequencies simultaneously?"
+
+### Added
+
+- **Channel plan** (`backend/channel_plan.py`): a small JSON file listing
+  the physical channels (`frequency_hz`, `label`, optional `lsn`,
+  `control`) with geometry helpers — span, center, and
+  `fits_in_bandwidth()` (does the whole plan fit one RSP's ~10 MHz?) and
+  `lsn_to_frequency()` for trunk-following.
+- **`backend/rf/` package**:
+  - `channelizer.py` — numpy DDC + quadrature FM demod that splits one
+    wideband IQ stream into per-channel audio. Exercised end-to-end with
+    synthetic IQ (a tone lands in the right channel; an FM tone
+    demodulates back to its modulating frequency).
+  - `multiplex.py` — runs one `LineRunner` (own parser, own channel tag)
+    per channel into the shared state/log; each event is stamped with its
+    channel's label + frequency.
+  - `bridge.py` — per-channel localhost TCP audio server (dsd-fme reads
+    `-i tcp:...`) + the capture→channelize→feed pump.
+  - `capture.py` — SoapySDR wideband IQ source (guarded import; hardware
+    path).
+- **`--channel-plan FILE`** (+ `--audio-rate`, `--audio-base-port`) — live
+  multi-frequency mode. Startup validates the plan and single-RSP
+  feasibility without touching hardware; a plan wider than 10 MHz fails
+  fast with guidance.
+- Events, radios, and active calls now carry `channel_label`/`frequency`;
+  the StateManager keys active calls by `"<channel>:<slot>"` so two
+  frequencies' slot-1 calls don't collide. Single-channel behaviour is
+  byte-for-byte unchanged (bare-slot keys, `channel_label` null). The live
+  dashboard shows the channel on each call card.
+
+### Notes
+
+- The IQ capture + channelizer→TCP bridge is a hardware path (needs an RSP
+  + SoapySDR) and isn't exercised by CI; the channel plumbing, DSP,
+  orchestration, and TCP audio server are all unit-tested. Actual decode
+  throughput on a Pi (wideband capture + N FM demods + N dsd-fme) needs
+  on-hardware measurement — see Phase 8 for decoding only active channels.
+
 ## [0.23.0] — 2026-07-11
 
 SDRplay direct tuning — the RSP1B can now be driven straight from the

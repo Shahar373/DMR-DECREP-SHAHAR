@@ -52,6 +52,12 @@ class _BaseEvent(BaseModel):
     timestamp: datetime = Field(default_factory=lambda: datetime.now())
     raw_line: str
     schema_version: int = Field(default=EVENT_SCHEMA_VERSION)
+    # RF channel attribution for multi-frequency capture (Phase 7). None in
+    # single-channel mode. Additive — SQLite columns + CSV already exist
+    # (0.20.0); readers tolerate the extra keys, so no EVENT_SCHEMA_VERSION
+    # bump. ``frequency`` is Hz.
+    frequency: Optional[float] = None
+    channel_label: Optional[str] = None
 
 
 # --- Phase 1A: control channel ---

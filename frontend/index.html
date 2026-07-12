@@ -661,10 +661,15 @@ function renderCalls(snap) {
     const dur = ((new Date(snap.generated_at) - new Date(c.started_at)) / 1000).toFixed(0);
     const div = document.createElement('div');
     div.className = 'call-card' + (c.is_encrypted ? ' enc' : '');
+    // Multi-frequency mode tags each call with its channel/frequency.
+    const chanTag = c.channel_label
+      ? `<span class="tag cap-tag" title="${c.frequency ? (c.frequency/1e6).toFixed(4)+' MHz' : ''}">${c.channel_label}</span>`
+      : '';
     div.innerHTML = `
       <div class="call-src">Radio ${c.src}</div>
       <div class="call-tg">→ TG ${c.tgt}  (Slot ${c.slot})</div>
       <div class="call-meta">
+        ${chanTag}
         <span class="tag">${c.frame_count} frames</span>
         <span class="tag">${dur}s</span>
         ${c.is_encrypted ? '<span class="tag enc-tag">ENC</span>' : ''}

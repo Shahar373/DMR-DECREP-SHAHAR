@@ -413,6 +413,85 @@ def build_dsd_command(args: argparse.Namespace) -> list[str]:
     ]
 
 
+async def _run_multichannel_live(  # pragma: no cover - needs an RSP + SoapySDR
+    args: argparse.Namespace,
+    state: StateManager,
+    event_log,
+    on_event,
+    stop_event: asyncio.Event,
+) -> None:
+    """Wideband capture → channelizer → N TCP audio feeds → N dsd-fme.
+
+    Hardware path (SoapySDR + RSP). The channel plumbing, scheduler, and
+    channelizer are unit-tested separately; this is the assembly.
+    """
+    from .channel_plan import load_channel_plan
+    from .rf.bridge import AudioTcpServer, run_capture_pump
+    from .rf.capture import WidebandCapture
+    from .rf.channelizer import Channelizer
+    from .rf.multiplex import default_source_factory, run_multichannel
+
+    plan = load_channel_plan(Path(args.channel_plan))
+    print(
+        f"# channel-plan: {len(plan.channels)} channels, span "
+        f"{plan.span_hz()/1e6:.3f} MHz, center {(plan.center_hz() or 0)/1e6:.4f} MHz",
+        file=sys.stderr,
+    )
+
+    servers: dict = {}
+    for i, ch in enumerate(plan.channels):
+        srv = AudioTcpServer(port=args.audio_base_port + i)
+        await srv.start()
+        servers[ch.label] = srv
+
+    capture = WidebandCapture(
+        plan, driver=args.sdr_driver, device_args=args.sdr_device_args,
+        gain=(args.gain or None),
+    )
+    channelizer = Channelizer(plan, capture.sample_rate, audio_rate=args.audio_rate)
+
+    # Phase 8: only decode channels the scheduler marks active.
+    active_fn = None
+    scheduler = None
+    wrapped_on_event = on_event
+    if args.follow_traffic:
+        from .rf.scheduler import TrafficScheduler
+        scheduler = TrafficScheduler(plan)
+        active_fn = scheduler.active_labels
+
+        def wrapped_on_event(ev, _sched=scheduler, _next=on_event):
+            try:
+                _sched.on_event(ev)
+            except Exception:  # noqa: BLE001
+                pass
+            if _next is not None:
+                _next(ev)
+
+    pump = asyncio.create_task(
+        run_capture_pump(capture, channelizer, servers, stop_event, active_fn)
+    )
+    pump.add_done_callback(_surface_task_exception("capture-pump"))
+
+    factory = default_source_factory(
+        plan, args.dsd_bin, Path(args.calls_dir), stop_event,
+        base_port=args.audio_base_port,
+        liveness_timeout=(args.liveness_timeout if args.liveness_timeout > 0 else None),
+    )
+    try:
+        await run_multichannel(
+            plan, state, factory, event_log=event_log,
+            on_event=wrapped_on_event, stop_event=stop_event,
+        )
+    finally:
+        pump.cancel()
+        try:
+            await pump
+        except (asyncio.CancelledError, Exception):  # noqa: BLE001
+            pass
+        for srv in servers.values():
+            await srv.close()
+
+
 def _parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     from . import __version__
     p = argparse.ArgumentParser(
@@ -464,6 +543,23 @@ def _parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     p.add_argument("--bandwidth-khz", type=int, default=24,
                    help="channel bandwidth in kHz for soapy — 24 suits a "
                         "12.5 kHz DMR channel (default: %(default)s)")
+
+    # ── Multi-frequency capture (Phase 7) ─────────────────────────────
+    p.add_argument("--channel-plan", default=None,
+                   help="JSON channel-plan file → decode several Cap+ "
+                        "channels at once from one wideband RSP capture "
+                        "(implies --rf-backend soapy). See "
+                        "backend/channel_plan.py for the format.")
+    p.add_argument("--audio-rate", type=int, default=48000,
+                   help="per-channel audio rate for the channelizer TCP "
+                        "feed in multi-frequency mode (default: %(default)s)")
+    p.add_argument("--audio-base-port", type=int, default=7355,
+                   help="first localhost TCP port for channelized audio; "
+                        "channel N uses base+N (default: %(default)s)")
+    p.add_argument("--follow-traffic", action="store_true",
+                   help="Phase 8: only run decoders on channels that are "
+                        "active (control-channel grants + energy), to save "
+                        "CPU when channels outnumber the CPU budget")
 
     p.add_argument("--snapshot", default="snapshot.json",
                    help="periodic JSON snapshot path (default: %(default)s)")
@@ -722,7 +818,16 @@ async def _run(args: argparse.Namespace) -> None:
         )
         day_retention_task.add_done_callback(_surface_task_exception("day-retention"))
 
-    if args.live:
+    consume = None
+    if args.live and args.channel_plan:
+        # Multi-frequency mode: one wideband capture, N channelized
+        # decoders. Runs its own set of per-channel LineRunners, so the
+        # single `runner` above is unused on this path.
+        calls_dir.mkdir(parents=True, exist_ok=True)
+        consume = _run_multichannel_live(
+            args, state, event_log, printer, stop_event,
+        )
+    elif args.live:
         # dsd-fme writes per-call WAVs to --calls-dir via `-7 <dir> -P`.
         calls_dir.mkdir(parents=True, exist_ok=True)
         cmd = build_dsd_command(args)
@@ -737,12 +842,14 @@ async def _run(args: argparse.Namespace) -> None:
         source = stream_subprocess_with_retry(
             cmd, stop_event=stop_event, liveness_timeout=liveness,
         )
+        consume = runner.consume_lines(source)
     else:
         print(f"# replaying {args.replay} (delay={args.replay_delay}s)", file=sys.stderr)
         source = stream_file(args.replay, delay=args.replay_delay, stop_event=stop_event)
+        consume = runner.consume_lines(source)
 
     try:
-        await runner.consume_lines(source)
+        await consume
     finally:
         stop_event.set()
         try:
@@ -836,7 +943,28 @@ def main(argv: Optional[list[str]] = None) -> None:
             file=sys.stderr,
         )
         sys.exit(2)
-    if getattr(args, "live", False) and args.rf_backend == "soapy":
+    if getattr(args, "live", False) and args.channel_plan:
+        # Multi-frequency mode gets its frequencies from the plan, not
+        # --frequency. Validate the plan (and single-RSP feasibility) now
+        # so a typo fails fast without touching hardware.
+        from .channel_plan import load_channel_plan
+        try:
+            plan = load_channel_plan(Path(args.channel_plan))
+        except Exception as exc:  # noqa: BLE001
+            print(f"# FATAL: bad --channel-plan: {exc}", file=sys.stderr)
+            sys.exit(2)
+        if not plan.channels:
+            print("# FATAL: --channel-plan has no channels.", file=sys.stderr)
+            sys.exit(2)
+        if not plan.fits_in_bandwidth(10_000_000):
+            print(
+                f"# FATAL: channel plan spans {plan.span_hz()/1e6:.3f} MHz — "
+                "wider than one RSP1B (~10 MHz). Narrow it, scan, or add a "
+                "receiver.",
+                file=sys.stderr,
+            )
+            sys.exit(2)
+    elif getattr(args, "live", False) and args.rf_backend == "soapy":
         if not args.frequency:
             print(
                 "# FATAL: --rf-backend soapy requires --frequency "
