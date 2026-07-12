@@ -9,6 +9,320 @@ Versioning follows [Semantic Versioning](https://semver.org/):
 Source of truth: `backend/__init__.py` (`__version__`). The dashboard
 footer shows the running build's version and `/api/version` exposes it.
 
+## [0.25.0] — 2026-07-12
+
+Automatic traffic-following — with more channels than the Pi can decode
+at once, only put a decoder where there's actually traffic. Answers
+"can it automatically move to where the traffic is?"
+
+### Added
+
+- **`backend/rf/scheduler.py`** — `TrafficScheduler` decides, moment to
+  moment, which channel labels deserve a live decoder:
+  - control channels are always decoded (they carry the grants);
+  - a decoded event on a channel, or a control-channel grant
+    (`LSN_STATUS` Active / `BANK_CALL` `lsn_to_tg`) mapped through the
+    channel plan's LSN→frequency table, keeps that channel active for a
+    `hang_seconds` window so a decoder doesn't drop mid-transmission;
+  - `--follow-traffic` wires it into the capture pump so idle channels are
+    skipped; `max_active` caps concurrent decoders (control + freshest);
+  - decisions use the event clock, so replay tracks the log's own time.
+- **`backend/rf/energy.py`** — FFT per-channel power detection as the
+  fallback signal (activate a channel carrying RF before a grant is even
+  decoded). Synthetic-IQ tested: a tone localises to its channel.
+- **`--follow-traffic`** CLI flag (multi-frequency mode).
+
+### Notes
+
+- The scheduler and energy detector are pure/unit-tested (18 tests incl.
+  an end-to-end run of real parsed events through the multiplex into the
+  scheduler); their integration into the live capture pump is the same
+  hardware path as Phase 7. When the whole plan fits in the RSP and the
+  Pi can decode every channel, `--follow-traffic` is unnecessary — you're
+  already listening everywhere and traffic just appears; it's the
+  CPU-budget lever for larger plans.
+
+## [0.24.0] — 2026-07-12
+
+Multi-frequency capture — decode several Capacity Plus channels at once
+from a single wideband RSP1B capture, instead of one dsd-fme on one
+frequency. Answers "can we listen to several frequencies simultaneously?"
+
+### Added
+
+- **Channel plan** (`backend/channel_plan.py`): a small JSON file listing
+  the physical channels (`frequency_hz`, `label`, optional `lsn`,
+  `control`) with geometry helpers — span, center, and
+  `fits_in_bandwidth()` (does the whole plan fit one RSP's ~10 MHz?) and
+  `lsn_to_frequency()` for trunk-following.
+- **`backend/rf/` package**:
+  - `channelizer.py` — numpy DDC + quadrature FM demod that splits one
+    wideband IQ stream into per-channel audio. Exercised end-to-end with
+    synthetic IQ (a tone lands in the right channel; an FM tone
+    demodulates back to its modulating frequency).
+  - `multiplex.py` — runs one `LineRunner` (own parser, own channel tag)
+    per channel into the shared state/log; each event is stamped with its
+    channel's label + frequency.
+  - `bridge.py` — per-channel localhost TCP audio server (dsd-fme reads
+    `-i tcp:...`) + the capture→channelize→feed pump.
+  - `capture.py` — SoapySDR wideband IQ source (guarded import; hardware
+    path).
+- **`--channel-plan FILE`** (+ `--audio-rate`, `--audio-base-port`) — live
+  multi-frequency mode. Startup validates the plan and single-RSP
+  feasibility without touching hardware; a plan wider than 10 MHz fails
+  fast with guidance.
+- Events, radios, and active calls now carry `channel_label`/`frequency`;
+  the StateManager keys active calls by `"<channel>:<slot>"` so two
+  frequencies' slot-1 calls don't collide. Single-channel behaviour is
+  byte-for-byte unchanged (bare-slot keys, `channel_label` null). The live
+  dashboard shows the channel on each call card.
+
+### Notes
+
+- The IQ capture + channelizer→TCP bridge is a hardware path (needs an RSP
+  + SoapySDR) and isn't exercised by CI; the channel plumbing, DSP,
+  orchestration, and TCP audio server are all unit-tested. Actual decode
+  throughput on a Pi (wideband capture + N FM demods + N dsd-fme) needs
+  on-hardware measurement — see Phase 8 for decoding only active channels.
+
+## [0.23.0] — 2026-07-11
+
+SDRplay direct tuning — the RSP1B can now be driven straight from the
+monitor via SoapySDR, removing the manual SDRconnect GUI + virtual audio
+cable. First step toward the fully-automatic, multi-frequency capture in
+later phases.
+
+### Added
+
+- **`--rf-backend {pulse,soapy}`** (default `pulse` for backward
+  compatibility). With `soapy`, `dsd-fme` opens the SDRplay RSP directly
+  (`-i soapy:driver=sdrplay:<freq>:<gain>:<ppm>:<bw>`) and the monitor
+  tunes it from new flags: `--frequency` (Hz or `NNN.NM` MHz),
+  `--sdr-driver`, `--sdr-device-args`, `--gain`, `--ppm`,
+  `--bandwidth-khz`. No SDRconnect, no `dmr_capture` sink.
+- `build_dsd_command()` / `build_soapy_input()` / `normalize_frequency()`
+  — pure, unit-tested command construction (hardware not required);
+  startup fails fast with a clear message if `soapy` is selected without
+  a valid `--frequency`.
+- **`scripts/setup-sdrplay.sh`** — installs/verifies the SoapySDR
+  runtime, the SoapySDRPlay3 driver, and device discovery
+  (`SoapySDRUtil --find`), with exact instructions for the proprietary
+  SDRplay API service. `scripts/check_env.sh` now checks the SDR chain
+  (API service + SoapySDR device) instead of just SDRconnect;
+  `scripts/install-deps.sh` installs `soapysdr-tools`/`libsoapysdr-dev`.
+
+### Changed
+
+- `scripts/dmr-monitor.service` defaults to the `soapy` backend (with the
+  legacy pulse invocation kept as an inline comment); README pipeline
+  diagram documents both backends.
+
+### Notes
+
+- The exact SoapySDR arg string can differ between `dsd-fme` forks
+  (lwvmobile vs the newer dsd-neo) — verify against `dsd-fme -h` on the
+  target if a live spawn fails. The event schema already carries optional
+  `frequency`/`channel_label` (added in 0.20.0), so the upcoming
+  multi-frequency phase needs no further migration.
+
+## [0.22.0] — 2026-07-11
+
+Day-based navigation — the collected history is now browsable and
+exportable by day from the UI, with linkable URLs.
+
+### Added
+
+- **Day picker** (shared component, `◀ [Today — live / recorded days] ▶`
+  fed by `/api/days`) on the Debrief and Stats pages. The selected day
+  lives in the URL (`?day=YYYY-MM-DD`) so day views are shareable links;
+  deep links auto-select the day on load.
+- **Debrief day view**: picking a day queries `/api/history?day=` with
+  real pagination, disables the free-form time range, and exposes
+  per-day export buttons — CSV via `/api/export` and raw NDJSON (the
+  day file itself, byte-for-byte).
+- **`GET /api/stats/day/{day}`** — whole-day statistics shaped exactly
+  like `/api/stats` (per-type counts, top talkers/talkgroups, hourly
+  buckets, quality ratios computed over the full day) so the Stats page
+  reuses its chart rendering unchanged. Live mode is now explicitly
+  labeled "live (in-memory window)" vs "day YYYY-MM-DD"; historical days
+  don't auto-refresh.
+- Dossier `first_seen`/`last_seen` timestamps deep-link into the Debrief
+  day view for that date.
+
+### Fixed
+
+- The Stats page no longer dies entirely when the Chart.js CDN is
+  unreachable (offline Pi / proxy hiccup) — charts stay empty but the
+  quality analyzer, tables, and day navigation keep working.
+
+## [0.21.0] — 2026-07-11
+
+Responsive frontend foundation — the five dashboard pages now adapt to
+phone / tablet / desktop instead of being desktop-only, on a shared
+design-token + component layer.
+
+### Added
+
+- **`frontend/assets/style.css`** — shared design tokens (the dark
+  palette, a rem type scale, spacing) and components (nav, buttons,
+  hamburger) extracted from the 5× copy-pasted per-page `<style>` blocks,
+  plus per-page responsive overrides at three breakpoints (<640px,
+  640–1023px, ≥1024px). `@media (pointer: coarse)` enforces ≥44px touch
+  targets.
+- **`frontend/assets/shared.js`** — the site nav is now injected from one
+  place (`data-shared-nav` placeholder on every page, active link derived
+  from the pathname, hamburger below 640px) and `/api/version` is fetched
+  once for the version tag instead of per-page copies.
+- Live header shows **"sent/total" radios** when the broadcast snapshot
+  is trimmed, with the archived count in the tooltip.
+
+### Changed
+
+- **Phones get real layouts**: the live dashboard's fixed
+  `100vh/overflow:hidden` two-column shell becomes a single scrolling
+  column (map 45dvh on top, then calls/history/debrief, radios table with
+  its own horizontal scroll); Debrief's 7-column table renders as labeled
+  cards; Stats/Alerts grids collapse (min(420px,100%) minimums); Network
+  stacks the graph above the edge list with dvh sizing.
+- **Radios table renders incrementally** — rows are keyed by radio id and
+  only re-render when their content signature changes; DOM order is
+  touched only when the sort order changes. Previously the whole tbody
+  was rebuilt via innerHTML on every WS frame plus an O(rows)
+  querySelectorAll pass injecting Dossier buttons (now built into the row
+  template).
+- Cytoscape skips the expensive cose re-layout when the graph topology is
+  unchanged between refreshes (weights update in place) — the biggest
+  mobile CPU win on the Network page.
+- Debrief page-size options aligned with the server clamp
+  (100/500/1000/2000, default 500).
+
+## [0.20.0] — 2026-07-11
+
+Day-partitioned data layer — collected data is now organised by local
+day with rollover at midnight, structured per-day export, and retention
+that drops whole days instead of rewriting a multi-GB file.
+
+### Added
+
+- **Per-day JSONL partitioning** (live CLI mode): events are written to
+  `events/events-YYYY-MM-DD.jsonl`. Rollover is *lazy by event date* — the
+  day file is picked from each event's own timestamp inside `append()`,
+  never by a wall-clock timer, so replaying a historical capture lands in
+  the capture's own days and no event can straddle a rotation.
+- **Automatic monolith migration**: a legacy single-file `events.jsonl` is
+  split into per-day files at startup (or explicitly via
+  `--migrate-jsonl`). Crash-safe and idempotent — buckets are staged in a
+  temp dir behind a COMPLETE marker, unreadable lines go to an
+  `-unknown-date` bucket (never dropped), and the legacy file is only ever
+  *renamed* to `events.jsonl.migrated` as a backup.
+- **`--retention-days N`** — day-granular retention: whole day files are
+  unlinked and their index rows deleted (indexed `DELETE WHERE day < ?`).
+  Mutually exclusive with the now-deprecated `--event-retention-hours`
+  (which, in partition mode, also degrades gracefully to whole-day
+  unlinks — the multi-GB JSONL rewrite is gone).
+- **`GET /api/days`** — days with data + per-day event/voice counts and
+  time bounds (indexed `GROUP BY day`), for the upcoming day-picker UI.
+- **`GET /api/export?day=YYYY-MM-DD&format=ndjson|csv`** (and
+  `from=`/`to=` ranges, plus `types`/`src`/`tgt` filters) — streaming
+  structured export. A single unfiltered day as NDJSON streams the raw
+  partition file byte-for-byte; everything else goes through the
+  read-only SQLite cursor with O(batch) memory. `day=` filter also added
+  to `/api/history` and `/api/history.csv`.
+- **SQLite layout v2**: `day` column (= `ts[:10]`, indexed) plus nullable
+  `frequency`/`channel_label` columns and matching CSV tail columns —
+  pre-provisioned for the SDRplay multi-frequency phase so no second
+  migration will be needed. Existing DBs are ALTERed and backfilled in
+  chunked transactions at startup (progress logged; minutes on a multi-GB
+  Pi SD card, one time).
+
+### Changed
+
+- Startup priming reads **today's** day file only, instead of pydantic-
+  parsing the entire history under the buffer lock on every boot.
+  `/api/health` reports the summed size of all day files.
+
+## [0.19.0] — 2026-07-11
+
+Load hardening, part 2 of 2 — the heavy analytical endpoints now aggregate
+inside SQLite instead of materialising raw event rows in Python, and live
+state is bounded.
+
+### Changed
+
+- **`/api/network` runs as GROUP BY in SQLite.** New
+  `EventIndex.pair_counts()` / `distinct_gps_radios()` aggregates replace
+  the two up-to-500k-row pulls (~120 MB of Python dicts per call — the
+  single most likely OOM trigger on a Pi). The graph output is
+  arithmetically identical; an equivalence test pins the old row-by-row
+  logic as the oracle.
+- **Dossier (`/api/radio/{id}`) uses SQL aggregates** — `radio_bounds()`
+  (MIN/MAX), `hourly_histogram()` (UNION ALL of two indexed GROUP BYs),
+  `count_by_tgt()`, `count_encryption_by_slot()`. Call-session grouping now
+  reads only the newest 5000 voice frames (`descending=True` query) instead
+  of every voice row in the window; the bound is surfaced as
+  `recent_calls_window_rows` in the response. Known approximation: an event
+  where the radio is both src and tgt double-counts in the histogram.
+
+### Added
+
+- **`--max-radios`** (default 2000) — LRU cap on live radios by
+  `last_seen`, evicted in ~5% batches; enforced on snapshot restore too, so
+  a fat legacy `snapshot.json` can't resurrect an oversized dict. Evicted
+  radios stay fully queryable via `/api/history` and `/api/radio/{id}`;
+  additive `radios_evicted_total` snapshot field lets the UI show
+  "N archived".
+- `EventIndex.query(descending=True)` for newest-first bounded pulls.
+
+## [0.18.0] — 2026-07-11
+
+Load hardening, part 1 of 2 — closes the biggest "dashboard freezes or
+crashes under load" holes found in a full audit of the server layer.
+Groundwork for the day-partitioned data layer and the responsive UI that
+follow.
+
+### Added
+
+- **Trimmed broadcast snapshots.** The 1 Hz WebSocket payload (and
+  `/api/snapshot`) is now serialised **once per tick** and fanned out,
+  instead of being rebuilt per client/request on the event loop. The
+  broadcast view caps radios at 2000 (newest `last_seen` first) and drops
+  GPS trails older than 15 minutes; new additive `radios_total` field lets
+  the UI show "N of M". The persisted `snapshot.json` remains the full,
+  untrimmed view.
+- **`--snapshot-persist-interval`** (default 30 s) — full `snapshot.json`
+  writes now happen on their own cadence instead of at 1 Hz, cutting SD-card
+  wear and per-tick CPU. Worst case on power-yank: the last 30 s of
+  radio-state freshness; events themselves are still bounded by the 5 s
+  JSONL fsync.
+- **`stream_query()`** in `backend.event_index` — streams query results
+  from a dedicated read-only SQLite connection with `fetchmany`, O(batch)
+  memory. `/api/history.csv` now uses it; previously `iter_query()`
+  materialised the entire filtered history in RAM before the first byte
+  went out.
+- **Heavy-endpoint concurrency guard** — `/api/history`, `/api/network`,
+  `/api/radio/{id}` and `/api/quality` now run at most 2 at a time with a
+  short queue; excess requests get `503 + Retry-After: 2` instead of
+  exhausting the worker-thread pool.
+- **`--reset-token`** — `POST /api/reset` (destructive, previously
+  unauthenticated) now requires the `X-Reset-Token` header when a token is
+  configured, and is loopback-only otherwise. The dashboard prompts for the
+  token on 403.
+- **`--dev-reload-html`** — opt-out of the new in-memory HTML page cache
+  during frontend development.
+
+### Changed
+
+- `/api/history` `limit` ceiling lowered 20000 → 2000. Bulk pulls belong to
+  the streaming CSV export; a single 20k-dict JSON response was a real
+  memory spike on a Pi.
+- Frontend HTML pages are cached in memory after first read instead of
+  hitting the SD card on every request; shared static assets (when present)
+  are served from `/assets` via `StaticFiles`.
+- `/api/recordings` directory scans are cached: per-file WAV metadata keyed
+  by `(size, mtime)` plus a 2 s TTL memo of the full listing, so N dashboard
+  tabs polling every 3 s share one scan and headers are parsed once per
+  file version.
+
 ## [0.17.0] — 2026-06-06
 
 Fresh-Raspberry-Pi install hardening — a full audit (Python packaging, ARM

@@ -20,7 +20,12 @@ from backend.models import (
 
 
 def _ts(seconds: int = 0) -> datetime:
-    return datetime(2026, 5, 10, 9, 0, 0) + timedelta(seconds=seconds)
+    # Anchored to "yesterday" rather than a fixed date: build_dossier's
+    # window is measured back from datetime.now(), so a hard-coded 2026
+    # date silently aged out of the max 30-day window and the endpoint
+    # test started 404ing purely from the passage of time.
+    base = datetime.now().replace(microsecond=0) - timedelta(days=1)
+    return base + timedelta(seconds=seconds)
 
 
 def _voice(sec: int, src: int, tgt: int, slot: int = 1) -> VoiceCallEvent:

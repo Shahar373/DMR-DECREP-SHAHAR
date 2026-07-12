@@ -246,8 +246,10 @@ def test_extract_columns_normalises_ip_mapping_radio_id() -> None:
         ip="10.0.0.5", port=4001,
     )
     cols = _extract_columns(ip.model_dump(mode="json"))
-    assert cols[1] == "ip_mapping"
-    assert cols[2] == 12345  # src column populated from radio_id
+    # Layout v2: (ts, day, type, src, tgt, slot, addressing, error_type,
+    # encrypted, frequency, channel_label, schema_version, payload)
+    assert cols[2] == "ip_mapping"
+    assert cols[3] == 12345  # src column populated from radio_id
 
 
 def test_encrypted_column_set_for_encryption_events() -> None:
@@ -255,7 +257,7 @@ def test_encrypted_column_set_for_encryption_events() -> None:
         timestamp=_ts(0), raw_line="enc", slot=1, flco="0x04", fid="0x80",
     )
     cols = _extract_columns(enc.model_dump(mode="json"))
-    assert cols[7] == 1  # encrypted flag
+    assert cols[8] == 1  # encrypted flag (layout v2 — day column at index 1)
 
 
 def test_addressing_column_preserved_for_csbk() -> None:
@@ -264,7 +266,7 @@ def test_addressing_column_preserved_for_csbk() -> None:
         kind="Voice", src=101, tgt=102,
     )
     cols = _extract_columns(csbk.model_dump(mode="json"))
-    assert cols[5] == "Individual"
+    assert cols[6] == "Individual"
 
 
 # ── Retention ─────────────────────────────────────────────────────────

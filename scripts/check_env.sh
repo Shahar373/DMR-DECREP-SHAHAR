@@ -111,14 +111,27 @@ check_pulseaudio() {
     fi
 }
 
-# 6. SDRconnect (warn only — manual install)
-check_sdrconnect() {
-    if command -v sdrconnect >/dev/null 2>&1; then
-        print_result "$PASS" "sdrconnect" "$(command -v sdrconnect)"
-    elif [ -d "/opt/SDRconnect" ] || [ -d "$HOME/SDRconnect" ]; then
-        print_result "$PASS" "sdrconnect" "found in install dir"
+# 6. SDR chain for --rf-backend soapy (warn only — the pulse chain with
+#    SDRconnect still works without any of this)
+check_sdr_chain() {
+    if pgrep -x sdrplay_apiService >/dev/null 2>&1; then
+        print_result "$PASS" "sdrplay API service" "running"
     else
-        print_result "$WARN" "sdrconnect" "not found (install manually from SDRplay)"
+        print_result "$WARN" "sdrplay API service" "not running (needed for --rf-backend soapy; see scripts/setup-sdrplay.sh)"
+    fi
+    if ! command -v SoapySDRUtil >/dev/null 2>&1; then
+        print_result "$WARN" "SoapySDRUtil" "not found (sudo apt install soapysdr-tools)"
+        return
+    fi
+    if SoapySDRUtil --find 2>/dev/null | grep -qi "driver.*=.*sdrplay"; then
+        print_result "$PASS" "SoapySDR + RSP" "device discovered"
+    else
+        print_result "$WARN" "SoapySDR + RSP" "no sdrplay device found (bash scripts/setup-sdrplay.sh)"
+    fi
+    # Legacy chain still detected for operators on --rf-backend pulse.
+    if command -v sdrconnect >/dev/null 2>&1 \
+        || [ -d "/opt/SDRconnect" ] || [ -d "$HOME/SDRconnect" ]; then
+        print_result "$PASS" "sdrconnect (legacy)" "present"
     fi
 }
 
@@ -143,7 +156,7 @@ check_dsd_fme
 check_ffmpeg
 check_icecast
 check_pulseaudio
-check_sdrconnect
+check_sdr_chain
 check_null_sink
 echo "============================================="
 if [ "$fails" -eq 0 ]; then

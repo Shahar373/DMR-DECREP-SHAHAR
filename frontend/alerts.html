@@ -4,31 +4,31 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>DMR Cap+ — Alerts</title>
+<link rel="stylesheet" href="/assets/style.css">
+<script src="/assets/shared.js" defer></script>
 <style>
 * { box-sizing: border-box; margin: 0; padding: 0; }
-:root {
-  --bg: #0d1117; --bg2: #161b22; --bg3: #21262d; --border: #30363d;
-  --text: #e6edf3; --muted: #8b949e;
-  --green: #3fb950; --blue: #58a6ff; --yellow: #d29922;
-  --red: #f85149; --purple: #bc8cff;
-}
+/* Tokens (--bg, --blue, ...) come from /assets/style.css. */
 body { font-family: ui-monospace, 'Cascadia Code', monospace;
        background: var(--bg); color: var(--text); font-size: 13px;
        min-height: 100vh; }
 header {
   background: var(--bg2); border-bottom: 1px solid var(--border);
   padding: 10px 16px; display: flex; align-items: center; gap: 16px;
+  flex-wrap: wrap;
 }
 header h1 { font-size: 14px; font-weight: 700; color: var(--blue); }
-header .nav a {
-  color: var(--muted); text-decoration: none; margin-right: 12px; font-size: 12px;
-}
-header .nav a:hover, header .nav a.active { color: var(--blue); }
 header .meta { margin-left: auto; color: var(--muted); font-size: 11px; }
 
+/* min(..., 100%) minimums so the two columns collapse to one on narrow
+ * screens instead of forcing horizontal scroll. */
 main { padding: 16px; display: grid; gap: 16px;
-       grid-template-columns: minmax(380px, 1fr) minmax(420px, 2fr);
+       grid-template-columns: minmax(min(380px, 100%), 1fr) minmax(min(420px, 100%), 2fr);
        max-width: 1400px; margin: 0 auto; }
+@media (max-width: 1023px) {
+  main { grid-template-columns: 1fr; }
+  .card { overflow-x: auto; }
+}
 .card {
   background: var(--bg2); border: 1px solid var(--border); border-radius: 6px;
   padding: 14px 16px;
@@ -84,17 +84,11 @@ th { font-size: 10px; color: var(--muted); text-transform: uppercase;
 .help { color: var(--muted); font-size: 10px; margin-top: 2px; }
 </style>
 </head>
-<body>
+<body class="page-alerts">
 
 <header>
   <h1>DMR Cap+ Alerts</h1>
-  <nav class="nav">
-    <a href="/">Live</a>
-    <a href="/debrief">Debrief</a>
-    <a href="/stats">Stats</a>
-    <a href="/network">Network</a>
-    <a href="/alerts" class="active">Alerts</a>
-  </nav>
+  <nav class="nav" data-shared-nav></nav>
   <div class="meta">
     Rules: <span id="m-rules">—</span> ·
     Firings (live): <span id="m-firings">—</span> ·
@@ -320,9 +314,7 @@ function connectWs() {
   };
 }
 
-fetch('/api/version').then(r => r.json()).then(v => {
-  if (v && v.version) $('m-version').textContent = `v${v.version}`;
-}).catch(() => {});
+// Version tag comes from /assets/shared.js.
 
 loadRules();
 loadRecent();

@@ -4,14 +4,11 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>DMR Cap+ — Debrief</title>
+<link rel="stylesheet" href="/assets/style.css">
+<script src="/assets/shared.js" defer></script>
 <style>
 * { box-sizing: border-box; margin: 0; padding: 0; }
-:root {
-  --bg: #0d1117; --bg2: #161b22; --bg3: #21262d; --border: #30363d;
-  --text: #e6edf3; --muted: #8b949e;
-  --green: #3fb950; --blue: #58a6ff; --yellow: #d29922;
-  --red: #f85149; --purple: #bc8cff;
-}
+/* Tokens (--bg, --blue, ...) come from /assets/style.css. */
 body { font-family: ui-monospace, 'Cascadia Code', monospace;
        background: var(--bg); color: var(--text); font-size: 12px;
        height: 100vh; display: flex; flex-direction: column; overflow: hidden; }
@@ -21,10 +18,6 @@ header {
   flex-shrink: 0;
 }
 header h1 { font-size: 14px; font-weight: 700; color: var(--blue); }
-header .nav a {
-  color: var(--muted); text-decoration: none; margin-right: 12px; font-size: 12px;
-}
-header .nav a:hover, header .nav a.active { color: var(--blue); }
 header .meta { margin-left: auto; color: var(--muted); font-size: 11px; }
 header .meta span { color: var(--text); }
 
@@ -108,24 +101,22 @@ tr:hover td { background: var(--bg3); }
 #pager .info { color: var(--muted); font-size: 11px; margin-left: auto; }
 </style>
 </head>
-<body>
+<body class="page-debrief">
 
 <header>
   <h1>DMR Cap+ Debrief</h1>
-  <nav class="nav">
-    <a href="/">Live</a>
-    <a href="/debrief" class="active">Debrief</a>
-    <a href="/stats">Stats</a>
-    <a href="/network">Network</a>
-    <a href="/alerts">Alerts</a>
-  </nav>
+  <nav class="nav" data-shared-nav></nav>
   <div class="meta">
-    Source: <span>events.jsonl on disk</span>
+    Source: <span>events on disk</span>
     <span id="m-version" style="margin-left:12px"></span>
   </div>
 </header>
 
 <form id="filters" onsubmit="event.preventDefault(); resetAndSearch();">
+  <div class="f-group">
+    <label>Day</label>
+    <div id="day-picker" style="display:flex;gap:4px"></div>
+  </div>
   <div class="f-group">
     <label for="f-from">From</label>
     <input id="f-from" type="datetime-local" step="1">
@@ -157,16 +148,20 @@ tr:hover td { background: var(--bg3); }
   </div>
   <div class="f-group">
     <label for="f-limit">Limit</label>
+    <!-- Server clamps /api/history at 2000; huge single-page dumps moved
+         to the streaming CSV/NDJSON exports. -->
     <select id="f-limit">
-      <option value="200">200</option>
-      <option value="1000" selected>1000</option>
-      <option value="5000">5000</option>
-      <option value="20000">20000</option>
+      <option value="100">100</option>
+      <option value="500" selected>500</option>
+      <option value="1000">1000</option>
+      <option value="2000">2000</option>
     </select>
   </div>
   <div class="f-actions">
     <button type="button" class="btn" id="btn-clear">Clear</button>
-    <button type="button" class="btn" id="btn-csv">⤓ Export CSV</button>
+    <button type="button" class="btn" id="btn-csv">⤓ CSV</button>
+    <button type="button" class="btn" id="btn-ndjson" style="display:none"
+            title="Raw NDJSON of the selected day">⤓ NDJSON</button>
     <button type="submit" class="btn primary">Search</button>
   </div>
 </form>
@@ -223,16 +218,32 @@ const els = {
 };
 let currentOffset = 0;
 let currentTruncated = false;
+let currentDay = '';   // '' = live/all; 'YYYY-MM-DD' = historical day view
 
 function buildQuery(extra = {}) {
   const p = new URLSearchParams();
-  if (els.from.value)  p.set('since', els.from.value);
-  if (els.to.value)    p.set('until', els.to.value);
+  if (currentDay) {
+    // Day view: the day bound replaces the free-form time range.
+    p.set('day', currentDay);
+  } else {
+    if (els.from.value)  p.set('since', els.from.value);
+    if (els.to.value)    p.set('until', els.to.value);
+  }
   if (els.src.value)   p.set('src', els.src.value);
   if (els.tgt.value)   p.set('tgt', els.tgt.value);
   if (els.types.value) p.set('types', els.types.value);
   for (const [k, v] of Object.entries(extra)) p.set(k, v);
   return p.toString();
+}
+
+function _setDayMode(day) {
+  currentDay = day || '';
+  const dayMode = !!currentDay;
+  // Time-range inputs don't apply in day view.
+  els.from.disabled = dayMode;
+  els.to.disabled = dayMode;
+  document.getElementById('btn-ndjson').style.display = dayMode ? '' : 'none';
+  resetAndSearch();
 }
 
 function describe(ev) {
@@ -298,18 +309,19 @@ function render(events) {
     const slot = ev.slot;
     const raw = escapeHTML(ev.raw_line || '');
     const evType = escapeHTML(ev.type);
+    // data-label drives the mobile card view (td::before in style.css).
     return `
       <tr>
-        <td class="t-time">${escapeHTML(fmtTime(ev.timestamp))}</td>
-        <td><span class="t-type ${evType}">${evType}</span></td>
-        <td>${src != null
+        <td class="t-time" data-label="">${escapeHTML(fmtTime(ev.timestamp))}</td>
+        <td data-label=""><span class="t-type ${evType}">${evType}</span></td>
+        <td data-label="SRC">${src != null
           ? `<a href="/?dossier=${encodeURIComponent(src)}" title="Open Dossier"
                 style="color:var(--blue);text-decoration:none">${escapeHTML(src)}</a>`
           : '<span class="muted">—</span>'}</td>
-        <td>${tgt != null ? escapeHTML(tgt) : '<span class="muted">—</span>'}</td>
-        <td>${slot != null ? escapeHTML(slot) : '<span class="muted">—</span>'}</td>
-        <td>${escapeHTML(describe(ev))}</td>
-        <td class="t-raw" title="${raw}">${raw}</td>
+        <td data-label="TGT">${tgt != null ? escapeHTML(tgt) : '<span class="muted">—</span>'}</td>
+        <td data-label="Slot">${slot != null ? escapeHTML(slot) : '<span class="muted">—</span>'}</td>
+        <td data-label="Summary">${escapeHTML(describe(ev))}</td>
+        <td class="t-raw" data-label="Raw" title="${raw}">${raw}</td>
       </tr>`;
   }).join('');
 }
@@ -346,11 +358,35 @@ document.getElementById('btn-clear').addEventListener('click', () => {
   els.from.value = ''; els.to.value = '';
   els.src.value = ''; els.tgt.value = '';
   els.types.value = 'voice_call,lrrp_position,encryption,quality';
-  els.limit.value = '1000';
+  els.limit.value = '500';
   resetAndSearch();
 });
 document.getElementById('btn-csv').addEventListener('click', () => {
+  if (currentDay) {
+    // Day view: the structured export endpoint (streams from SQLite).
+    const p = new URLSearchParams({ day: currentDay, format: 'csv' });
+    if (els.src.value)   p.set('src', els.src.value);
+    if (els.tgt.value)   p.set('tgt', els.tgt.value);
+    if (els.types.value) p.set('types', els.types.value);
+    window.location.href = '/api/export?' + p.toString();
+    return;
+  }
   window.location.href = '/api/history.csv?' + buildQuery();
+});
+document.getElementById('btn-ndjson').addEventListener('click', () => {
+  if (!currentDay) return;
+  // Unfiltered single-day NDJSON streams the raw day file byte-for-byte.
+  window.location.href = '/api/export?' +
+    new URLSearchParams({ day: currentDay, format: 'ndjson' }).toString();
+});
+
+// Day picker (shared.js) — deferred scripts have run by DOMContentLoaded.
+document.addEventListener('DOMContentLoaded', () => {
+  if (window.DMRShared) {
+    DMRShared.createDayPicker(
+      document.getElementById('day-picker'), _setDayMode,
+    );
+  }
 });
 els.prev.addEventListener('click', () => {
   const limit = parseInt(els.limit.value, 10);
@@ -361,11 +397,7 @@ els.next.addEventListener('click', () => {
   search(currentOffset + limit);
 });
 
-fetch('/api/version').then(r => r.json()).then(v => {
-  if (v && v.version) {
-    document.getElementById('m-version').textContent = `v${v.version}`;
-  }
-}).catch(() => {});
+// Version tag comes from /assets/shared.js.
 
 // First load: show today's traffic by default, no need to click anything.
 (function defaultRange() {

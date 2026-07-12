@@ -50,6 +50,11 @@ CSV_COLUMNS = [
     "error_type",
     "site",
     "rest_lsn",
+    # RF channel attribution — populated once the multi-frequency capture
+    # phase lands; blank until then. Additive columns at the tail so
+    # existing CSV consumers keyed by position keep working.
+    "frequency",
+    "channel_label",
     "raw_line",
 ]
 
@@ -115,12 +120,31 @@ def _row_from_dict(obj: dict) -> dict[str, object]:
         row["rest_lsn"] = obj.get("rest_lsn", "")
     elif et == "quality":
         row["error_type"] = obj.get("error_type", "")
+    if obj.get("frequency") is not None:
+        row["frequency"] = obj["frequency"]
+    if obj.get("channel_label"):
+        row["channel_label"] = obj["channel_label"]
     return row
 
 
 def _row_from_event(ev: Event) -> dict[str, object]:
     """Flatten an Event into a CSV row dict using CSV_COLUMNS keys."""
     return _row_from_dict(ev.model_dump(mode="json"))
+
+
+def _day_from_filename(path: Path) -> Optional[str]:
+    """Extract the YYYY-MM-DD suffix from a day-partition filename, or
+    None for files that don't follow the convention (e.g. the
+    ``-unknown-date`` bucket from migration)."""
+    stem = path.stem
+    if len(stem) >= 10:
+        cand = stem[-10:]
+        if (
+            len(cand) == 10 and cand[4] == "-" and cand[7] == "-"
+            and cand[:4].isdigit() and cand[5:7].isdigit() and cand[8:].isdigit()
+        ):
+            return cand
+    return None
 
 
 def stream_history(
@@ -130,48 +154,75 @@ def stream_history(
     src: Optional[int] = None,
     tgt: Optional[int] = None,
     types: Optional[Iterable[str]] = None,
+    day_from: Optional[str] = None,
+    day_to: Optional[str] = None,
 ) -> Iterator[dict]:
-    """Stream parsed event dicts from a JSONL file with server-side filtering.
+    """Stream parsed event dicts from a JSONL history with filtering.
 
-    Designed for the /debrief browser: the file may grow unbounded, so we
+    ``jsonl_path`` may be a single file or a day-partition directory —
+    a directory streams every ``*.jsonl`` inside it in sorted filename
+    order (chronological, thanks to the -YYYY-MM-DD suffix), and files
+    entirely outside a requested day range are skipped without opening.
+
+    Designed for the /debrief browser: history may grow unbounded, so we
     iterate line-by-line without loading it all into memory. Malformed
     lines (e.g. a half-written tail line during live append) are silently
     skipped.
     """
     if jsonl_path is None or not jsonl_path.exists():
         return
+    if jsonl_path.is_dir():
+        paths = sorted(jsonl_path.glob("*.jsonl"))
+    else:
+        paths = [jsonl_path]
     type_set = {str(t) for t in types} if types else None
-    with open(jsonl_path, "r", encoding="utf-8", errors="replace") as f:
-        for raw in f:
-            raw = raw.strip()
-            if not raw:
+    for path in paths:
+        # Whole-file skip when the filename carries a day outside range.
+        fday = _day_from_filename(path)
+        if fday is not None:
+            if day_from is not None and fday < day_from:
                 continue
-            try:
-                obj = json.loads(raw)
-            except json.JSONDecodeError:
+            if day_to is not None and fday > day_to:
                 continue
-            ts_str = obj.get("timestamp")
-            if not ts_str:
-                continue
-            try:
-                ts = datetime.fromisoformat(ts_str)
-            except (TypeError, ValueError):
-                continue
-            if since is not None and ts < since:
-                continue
-            if until is not None and ts > until:
-                continue
-            if type_set is not None and obj.get("type") not in type_set:
-                continue
-            if src is not None:
-                row_src = obj.get("src")
-                if row_src is None:
-                    row_src = obj.get("radio_id")
-                if row_src != src:
+        try:
+            fh = open(path, "r", encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        with fh as f:
+            for raw in f:
+                raw = raw.strip()
+                if not raw:
                     continue
-            if tgt is not None and obj.get("tgt") != tgt:
-                continue
-            yield obj
+                try:
+                    obj = json.loads(raw)
+                except json.JSONDecodeError:
+                    continue
+                ts_str = obj.get("timestamp")
+                if not ts_str:
+                    continue
+                try:
+                    ts = datetime.fromisoformat(ts_str)
+                except (TypeError, ValueError):
+                    continue
+                if since is not None and ts < since:
+                    continue
+                if until is not None and ts > until:
+                    continue
+                if day_from is not None and ts_str[:10] < day_from:
+                    continue
+                if day_to is not None and ts_str[:10] > day_to:
+                    continue
+                if type_set is not None and obj.get("type") not in type_set:
+                    continue
+                if src is not None:
+                    row_src = obj.get("src")
+                    if row_src is None:
+                        row_src = obj.get("radio_id")
+                    if row_src != src:
+                        continue
+                if tgt is not None and obj.get("tgt") != tgt:
+                    continue
+                yield obj
 
 
 def iter_history_csv(
@@ -194,8 +245,21 @@ class EventLog:
     """Ring-buffered, JSONL-persisted event log.
 
     The in-memory buffer is ``capacity`` events (default 20k) for fast
-    filtering. The on-disk JSONL grows without bound — the user controls
-    rotation externally.
+    filtering.
+
+    Two on-disk layouts:
+
+    * **single-file** (``partition=False``, the historical default kept
+      for library/test callers): one append-only JSONL at ``jsonl_path``
+      that grows without bound.
+    * **day-partitioned** (``partition=True``, what the CLI uses): one
+      file per local day at ``<parent>/<stem>/<stem>-YYYY-MM-DD.jsonl``.
+      Rollover is *lazy by event date* — the day file is chosen from each
+      event's own timestamp inside ``append``, not by a wall-clock timer,
+      so a replay of a historical capture lands in the capture's days and
+      no event can straddle a rotation. Retention becomes whole-file
+      unlinks (see ``prune_days_older_than``) instead of a multi-GB
+      rewrite.
     """
 
     def __init__(
@@ -204,9 +268,13 @@ class EventLog:
         capacity: int = 20_000,
         db_path: Optional[Path] = None,
         enable_index: bool = True,
+        partition: bool = False,
     ) -> None:
         self.jsonl_path = jsonl_path
         self.capacity = capacity
+        self.partition = bool(partition and jsonl_path is not None)
+        self.partition_dir: Optional[Path] = None
+        self._current_day: Optional[str] = None
         self._buf: deque[Event] = deque(maxlen=capacity)
         self._lock = threading.Lock()
         self._fh: Optional[io.TextIOBase] = None
@@ -219,8 +287,14 @@ class EventLog:
         self._last_write_error: Optional[str] = None
         if jsonl_path is not None:
             jsonl_path.parent.mkdir(parents=True, exist_ok=True)
-            # Line-buffered append; survives crashes line-by-line.
-            self._fh = open(jsonl_path, "a", buffering=1, encoding="utf-8")
+            if self.partition:
+                self.partition_dir = jsonl_path.parent / jsonl_path.stem
+                self.partition_dir.mkdir(parents=True, exist_ok=True)
+                # Writer opens lazily on the first append — an eventless
+                # day creates no file.
+            else:
+                # Line-buffered append; survives crashes line-by-line.
+                self._fh = open(jsonl_path, "a", buffering=1, encoding="utf-8")
             if enable_index:
                 resolved_db = db_path if db_path is not None else jsonl_path.with_suffix(".db")
                 try:
@@ -233,6 +307,31 @@ class EventLog:
                     )
                     self._index = None
 
+    @property
+    def history_path(self) -> Optional[Path]:
+        """Where on-disk history lives: the partition dir (day mode) or
+        the single JSONL file. What server fallback scans should use."""
+        return self.partition_dir if self.partition else self.jsonl_path
+
+    def day_file(self, day: str) -> Path:
+        """Path of one day's JSONL (partition mode only)."""
+        assert self.partition_dir is not None and self.jsonl_path is not None
+        return self.partition_dir / f"{self.jsonl_path.stem}-{day}.jsonl"
+
+    def _ensure_day_writer_locked(self, day: str) -> None:
+        """Open (or switch to) the writer for ``day``. Caller holds _lock."""
+        if self._fh is not None and day == self._current_day:
+            return
+        if self._fh is not None:
+            try:
+                self._fh.flush()
+                self._fh.close()
+            except OSError:
+                pass
+            self._fh = None
+        self._fh = open(self.day_file(day), "a", buffering=1, encoding="utf-8")
+        self._current_day = day
+
     def __len__(self) -> int:
         with self._lock:
             return len(self._buf)
@@ -242,14 +341,25 @@ class EventLog:
 
         Called at startup so the live ``/api/events`` feed (Debrief panel
         on the dashboard) doesn't go blank for a few minutes after a
-        restart. Reads the whole file forward; the deque's maxlen takes
-        care of keeping only the most recent ``capacity`` entries.
+        restart. The deque's maxlen keeps only the most recent
+        ``capacity`` entries.
+
+        Partition mode primes from TODAY's day file only — the old
+        behaviour read the entire (potentially multi-GB) history through
+        pydantic under the buffer lock at every startup. Trade-off: a
+        restart just after midnight starts with a thin live buffer, but
+        /api/history still serves yesterday from SQLite.
 
         Returns the number of events loaded into the buffer.
         """
         from pydantic import TypeAdapter
         from .models import Event as _Event
-        target = path or self.jsonl_path
+        if path is not None:
+            target = path
+        elif self.partition:
+            target = self.day_file(datetime.now().strftime("%Y-%m-%d"))
+        else:
+            target = self.jsonl_path
         if target is None or not target.exists():
             return 0
         ta = TypeAdapter(_Event)
@@ -279,7 +389,15 @@ class EventLog:
                 except OSError:
                     pass
                 self._fh = None
-            if self.jsonl_path is not None:
+            if self.partition and self.partition_dir is not None:
+                self._current_day = None
+                for p in self.partition_dir.glob("*.jsonl"):
+                    try:
+                        p.unlink()
+                    except OSError:
+                        pass
+                # Writer reopens lazily on the next append.
+            elif self.jsonl_path is not None:
                 try:
                     self.jsonl_path.unlink(missing_ok=True)
                 except OSError:
@@ -387,6 +505,15 @@ class EventLog:
             except Exception as exc:  # noqa: BLE001
                 print(f"# event-retention: DB prune failed ({exc})", file=sys.stderr)
 
+        if self.partition:
+            # Day files strictly OLDER than the cutoff's date can go whole;
+            # the cutoff's own day file is mixed and is left alone (it ages
+            # out on the next day's pass). No rewrite in partition mode.
+            day_metrics = self._unlink_day_files_before(cutoff.strftime("%Y-%m-%d"))
+            metrics["jsonl_lines_kept"] = 0
+            metrics["jsonl_bytes_freed"] = day_metrics["bytes_freed"]
+            return metrics
+
         if self.jsonl_path is None or not self.jsonl_path.exists():
             return metrics
 
@@ -481,11 +608,68 @@ class EventLog:
         metrics["jsonl_bytes_freed"] = max(0, old_size - new_size)
         return metrics
 
+    def _unlink_day_files_before(self, cutoff_day: str) -> dict:
+        """Unlink day files with day < cutoff_day. Never touches the
+        currently-open day file. Returns {files_deleted, bytes_freed}."""
+        deleted = 0
+        freed = 0
+        if self.partition_dir is None:
+            return {"files_deleted": 0, "bytes_freed": 0}
+        with self._lock:
+            current = self._current_day
+            for p in sorted(self.partition_dir.glob("*.jsonl")):
+                day = _day_from_filename(p)
+                if day is None or day >= cutoff_day:
+                    continue
+                if current is not None and day == current:
+                    continue  # belt & braces — the open writer is sacred
+                try:
+                    size = p.stat().st_size
+                    p.unlink()
+                except OSError:
+                    continue
+                deleted += 1
+                freed += size
+        return {"files_deleted": deleted, "bytes_freed": freed}
+
+    def prune_days_older_than(self, cutoff_day: str) -> dict:
+        """Day-granular retention: unlink whole day files with
+        ``day < cutoff_day`` and DELETE the matching index rows.
+
+        This is what ``--retention-days`` drives. Unlike the hours-based
+        ``prune_older_than`` there is never a JSONL rewrite — dropping a
+        day is one ``unlink`` per file plus an indexed chunked DELETE.
+
+        Returns ``{files_deleted, bytes_freed, db_deleted}``.
+        """
+        out = self._unlink_day_files_before(cutoff_day)
+        out["db_deleted"] = 0
+        if self._index is not None:
+            try:
+                out["db_deleted"] = self._index.prune_days_older_than(cutoff_day)
+                if out["db_deleted"] > 0:
+                    self._index.vacuum()
+            except Exception as exc:  # noqa: BLE001
+                print(f"# day-retention: DB prune failed ({exc})", file=sys.stderr)
+        return out
+
     # --- write path ---
 
     def append(self, ev: Event) -> None:
         with self._lock:
             self._buf.append(ev)
+            if self.partition:
+                # Lazy day rollover keyed by the EVENT's date (not wall
+                # clock): the parser already advances the date across
+                # midnight, and a replay writes into the capture's own
+                # days. Backward movement (replaying an old capture after
+                # live events) just reopens the older file in append mode.
+                day = ev.timestamp.strftime("%Y-%m-%d")
+                try:
+                    self._ensure_day_writer_locked(day)
+                except OSError as exc:
+                    self._write_errors += 1
+                    self._last_write_error = f"day-rollover: {type(exc).__name__}: {exc}"
             if self._fh is not None:
                 try:
                     self._fh.write(ev.model_dump_json() + "\n")

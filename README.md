@@ -3,10 +3,40 @@
 Live monitoring of a Motorola Capacity Plus DMR system: who's talking, where
 they are, and what's happening on the trunked control / payload channels.
 
-Pipeline:
+Pipeline (two RF backends):
 ```
-SDR (RSP1B) → SDRconnect → PulseAudio loopback → dsd-fme → parser → state → UI
+# --rf-backend soapy (default going forward): direct SDR control, fully automatic
+SDR (RSP1B) → SDRplay API service → SoapySDR → dsd-fme → parser → state → UI
+
+# --rf-backend pulse (legacy): manual SDRconnect + virtual audio cable
+SDR (RSP1B) → SDRconnect (GUI, manual tune) → PulseAudio loopback → dsd-fme → …
 ```
+
+The `soapy` backend lets `dsd-monitor` tune the RSP1B itself
+(`--frequency`), so there's no SDRconnect GUI and no virtual cable to set
+up. Run `bash scripts/setup-sdrplay.sh` once to install the chain, then:
+
+```bash
+python -m backend.cli --live --rf-backend soapy --frequency 168.5M --serve
+```
+
+### Multi-frequency capture (one RSP, several channels at once)
+
+If the site's Cap+ channels all fit within one RSP's ~10 MHz, a single
+wideband capture is channelized in software and each channel is decoded
+in parallel. Describe the channels in a JSON plan (see
+`backend/channel_plan.py`) and pass `--channel-plan`:
+
+```bash
+python -m backend.cli --live --channel-plan site.json --serve
+# only decode channels that are actually active (saves CPU):
+python -m backend.cli --live --channel-plan site.json --follow-traffic --serve
+```
+
+`--follow-traffic` keeps a decoder only on the control channel plus
+channels the control-channel grants (or RF energy) show as active — the
+system "goes where the traffic is" instead of decoding every channel all
+the time. Each event, radio, and call is tagged with its channel.
 
 ## Status
 

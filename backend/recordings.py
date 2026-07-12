@@ -85,6 +85,7 @@ class RecordingRegistry:
         base_dir: Path,
         min_duration: float = 0.2,
         ignore_recent_seconds: float = 1.5,
+        memo_ttl_seconds: float = 2.0,
     ) -> None:
         self.base_dir = base_dir
         self.base_dir.mkdir(parents=True, exist_ok=True)
@@ -92,6 +93,15 @@ class RecordingRegistry:
         # Skip files whose mtime is within this many seconds — they are
         # probably still being written and the WAV header is incomplete.
         self.ignore_recent_seconds = ignore_recent_seconds
+        # The dashboard polls /api/recordings every ~3 s; after weeks of
+        # recordings a naive scan re-opens every WAV header each poll.
+        # Two-level cache: per-file metadata keyed by (size, mtime) so a
+        # header is parsed once per file version, plus a short TTL memo of
+        # the whole listing so N concurrent tabs share one directory scan.
+        self.memo_ttl_seconds = memo_ttl_seconds
+        # name -> ((size, mtime), CallRecording | None)   (None = filtered out)
+        self._meta_cache: dict[str, tuple[tuple[int, float], Optional[CallRecording]]] = {}
+        self._memo: Optional[tuple[float, list[CallRecording]]] = None
 
     def file_path(self, filename: str) -> Path:
         """Resolve a filename against base_dir, stripping any path components."""
@@ -102,7 +112,13 @@ class RecordingRegistry:
         if not self.base_dir.exists():
             return []
         now = time.time()
+        if (
+            self._memo is not None
+            and now - self._memo[0] < self.memo_ttl_seconds
+        ):
+            return list(self._memo[1])
         recs: list[CallRecording] = []
+        seen: set[str] = set()
         for p in self.base_dir.iterdir():
             if not p.is_file() or p.suffix.lower() != ".wav":
                 continue
@@ -112,12 +128,22 @@ class RecordingRegistry:
                 continue
             if now - stat.st_mtime < self.ignore_recent_seconds:
                 continue
+            seen.add(p.name)
+            key = (stat.st_size, stat.st_mtime)
+            cached = self._meta_cache.get(p.name)
+            if cached is not None and cached[0] == key:
+                if cached[1] is not None:
+                    recs.append(cached[1])
+                continue
             duration = _read_wav_duration(p)
             if duration < self.min_duration:
+                # Remember the negative result so the header isn't
+                # re-parsed on every poll for a permanently-short file.
+                self._meta_cache[p.name] = (key, None)
                 continue
             tgt, src, slot = _parse_filename(p.name)
             started_at = datetime.fromtimestamp(stat.st_mtime - duration)
-            recs.append(CallRecording(
+            rec = CallRecording(
                 filename=p.name,
                 src=src,
                 tgt=tgt,
@@ -125,9 +151,17 @@ class RecordingRegistry:
                 started_at=started_at,
                 duration_seconds=duration,
                 file_bytes=stat.st_size,
-            ))
+            )
+            self._meta_cache[p.name] = (key, rec)
+            recs.append(rec)
+        # Drop cache entries for files that vanished (retention/manual rm).
+        if len(self._meta_cache) > len(seen):
+            self._meta_cache = {
+                n: v for n, v in self._meta_cache.items() if n in seen
+            }
         recs.sort(key=lambda r: r.started_at, reverse=True)
-        return recs
+        self._memo = (now, recs)
+        return list(recs)
 
     def prune_older_than(self, hours: float) -> tuple[int, int]:
         """Delete WAV files in ``base_dir`` older than ``hours``.
@@ -157,4 +191,7 @@ class RecordingRegistry:
                 continue
             deleted += 1
             freed += stat.st_size
+            self._meta_cache.pop(p.name, None)
+        if deleted:
+            self._memo = None  # listing changed — don't serve a stale memo
         return (deleted, freed)

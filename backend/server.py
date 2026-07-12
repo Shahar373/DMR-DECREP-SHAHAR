@@ -15,8 +15,17 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
-from fastapi import FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect
+from fastapi import (
+    FastAPI,
+    Header,
+    HTTPException,
+    Query,
+    Request,
+    WebSocket,
+    WebSocketDisconnect,
+)
 from fastapi.responses import FileResponse, HTMLResponse, Response, StreamingResponse
+from fastapi.staticfiles import StaticFiles
 
 from . import __build_date__, __version__
 from .alerts import Evaluator, rule_from_dict
@@ -48,6 +57,71 @@ _last_voice_at: Optional[datetime] = None
 
 FRONTEND_DIR = Path(__file__).parent.parent / "frontend"
 
+# Shared static assets (design tokens CSS, shared header JS). Mounted only
+# when the directory exists so older checkouts keep working.
+_ASSETS_DIR = FRONTEND_DIR / "assets"
+if _ASSETS_DIR.is_dir():
+    app.mount("/assets", StaticFiles(directory=str(_ASSETS_DIR)), name="assets")
+
+# HTML pages cached in memory at first hit — previously every page load did
+# a fresh read_text() from the SD card. --dev-reload-html re-reads on every
+# request for frontend iteration without restarts.
+_PAGE_CACHE: dict[str, str] = {}
+_dev_reload_html = False
+
+
+def set_dev_reload_html(enabled: bool) -> None:
+    global _dev_reload_html
+    _dev_reload_html = enabled
+
+
+def _page(name: str) -> HTMLResponse:
+    if _dev_reload_html or name not in _PAGE_CACHE:
+        _PAGE_CACHE[name] = (FRONTEND_DIR / name).read_text(encoding="utf-8")
+    return HTMLResponse(
+        _PAGE_CACHE[name], headers={"Cache-Control": "no-cache"},
+    )
+
+
+# ── Heavy-endpoint concurrency guard ────────────────────────────────────
+# The full-scan endpoints (/api/history, /api/network, /api/radio,
+# /api/quality) each run seconds of SQLite/JSONL work on a worker thread.
+# Unbounded, a handful of concurrent dashboard tabs exhausts the small
+# default to_thread pool on a Pi and starves every other request. Two run
+# at a time; a short queue absorbs bursts; beyond that we shed load with
+# 503 + Retry-After instead of queueing forever.
+_HEAVY_CONCURRENCY = 2
+_HEAVY_MAX_QUEUE = 4
+_heavy_sem = asyncio.Semaphore(_HEAVY_CONCURRENCY)
+_heavy_waiting = 0
+
+
+async def _run_heavy(fn, /, *args, **kwargs):
+    global _heavy_waiting
+    if _heavy_waiting >= _HEAVY_MAX_QUEUE:
+        raise HTTPException(
+            status_code=503,
+            detail="server busy — too many concurrent heavy queries, retry shortly",
+            headers={"Retry-After": "2"},
+        )
+    _heavy_waiting += 1
+    try:
+        async with _heavy_sem:
+            return await asyncio.to_thread(fn, *args, **kwargs)
+    finally:
+        _heavy_waiting -= 1
+
+
+# Guard for the destructive /api/reset endpoint. When a token is
+# configured (--reset-token) the X-Reset-Token header must match; without
+# one, only loopback clients may reset.
+_reset_token: Optional[str] = None
+
+
+def attach_reset_token(token: Optional[str]) -> None:
+    global _reset_token
+    _reset_token = token or None
+
 
 def note_voice_event(ts: datetime) -> None:
     """Bump the last-voice-seen marker (called by the wrapper on each
@@ -59,8 +133,11 @@ def note_voice_event(ts: datetime) -> None:
 
 
 def attach_state(sm: StateManager) -> None:
-    global _state
+    global _state, _broadcast_payload
     _state = sm
+    # A payload from a previously-attached StateManager is stale by
+    # definition (matters for tests that re-attach fresh state).
+    _broadcast_payload = None
 
 
 def attach_recordings(r: RecordingRegistry) -> None:
@@ -92,11 +169,31 @@ def attach_evaluator(ev: Optional[Evaluator]) -> None:
     _evaluator = ev
 
 
-async def push_snapshot() -> None:
-    """Serialise current state and enqueue to every connected WS client."""
-    if _state is None or not _subscribers:
+# The most recent broadcast payload (trimmed snapshot, already serialised).
+# Produced once per tick by the CLI's snapshot task and reused by the WS
+# fan-out, new WS connections, AND /api/snapshot — previously each of those
+# re-serialised the full unbounded snapshot (on the event loop for HTTP),
+# which grew with every radio ever heard and froze the live feed under load.
+_broadcast_payload: Optional[str] = None
+
+
+async def push_snapshot(payload: Optional[str] = None) -> None:
+    """Fan a snapshot payload out to every connected WS client.
+
+    ``payload`` is the pre-serialised trimmed snapshot from the CLI tick.
+    When omitted (tests, /api/reset), it is built here off-loop.
+    """
+    global _broadcast_payload
+    if payload is None:
+        if _state is None:
+            return
+        sm = _state
+        payload = await asyncio.to_thread(
+            lambda: sm.snapshot(trim=True).model_dump_json()
+        )
+    _broadcast_payload = payload
+    if not _subscribers:
         return
-    payload = _state.snapshot().model_dump_json()
     dead: set[asyncio.Queue] = set()
     for q in _subscribers:
         try:
@@ -111,9 +208,19 @@ async def push_snapshot() -> None:
 
 @app.get("/api/snapshot")
 async def get_snapshot():
+    if _broadcast_payload is not None:
+        # Zero serialisation per request — the payload is refreshed every
+        # broadcast tick (1 s in live mode), well within polling freshness.
+        return Response(content=_broadcast_payload, media_type="application/json")
     if _state is None:
         return {}
-    return _state.snapshot().model_dump()
+    sm = _state
+    return Response(
+        content=await asyncio.to_thread(
+            lambda: sm.snapshot(trim=True).model_dump_json()
+        ),
+        media_type="application/json",
+    )
 
 
 @app.get("/api/recordings")
@@ -172,7 +279,7 @@ async def get_health():
     last_event_at = None
     if _state is not None:
         last_event_at = getattr(_state, "_last_event_at", None)
-    jsonl_path = _event_log.jsonl_path if _event_log is not None else None
+    jsonl_path = _event_log.history_path if _event_log is not None else None
     db_path = None
     writer_health: Optional[dict] = None
     if _event_log is not None:
@@ -264,24 +371,32 @@ async def quality_window(window: int = Query(3600, ge=60, le=7 * 86400)):
     operators want to see — "is the link healthy *right now*". Prefers the
     SQLite index when available; falls back to scanning the JSONL.
     """
-    path = _event_log.jsonl_path if _event_log is not None else None
+    path = _event_log.history_path if _event_log is not None else None
     # On a cold-start day before the index is populated this falls through to
     # a full JSONL scan — hundreds of MB of disk reads on a long-running Pi.
-    # Off-loop so it never freezes the live WS feed.
-    return await asyncio.to_thread(
+    # Off-loop (and behind the heavy-endpoint semaphore) so it never
+    # freezes the live WS feed.
+    return await _run_heavy(
         quality_ratios_over_window, path, window_seconds=window, index=_prefer_index(),
     )
 
 
-def _history_filters(since, until, src, tgt, types):
+def _history_filters(since, until, src, tgt, types, day=None):
     type_list = [t.strip() for t in types.split(",") if t.strip()] if types else None
-    return {
+    filters = {
         "since": parse_since(since),
         "until": parse_since(until),
         "src": src,
         "tgt": tgt,
         "types": type_list,
     }
+    if day:
+        from .export import is_valid_day
+        if not is_valid_day(day):
+            raise HTTPException(status_code=422, detail="day must be YYYY-MM-DD")
+        filters["day_from"] = day
+        filters["day_to"] = day
+    return filters
 
 
 @app.get("/api/history")
@@ -291,23 +406,27 @@ async def history(
     src: Optional[int] = Query(None, description="Filter by source radio id"),
     tgt: Optional[int] = Query(None, description="Filter by talkgroup / target id"),
     types: Optional[str] = Query(None, description="Comma-separated EventType values"),
-    limit: int = Query(1000, ge=1, le=20000),
+    day: Optional[str] = Query(None, description="Restrict to one local day (YYYY-MM-DD)"),
+    limit: int = Query(1000, ge=1, le=2000),
     offset: int = Query(0, ge=0),
 ):
     """Read events from the on-disk JSONL with server-side filtering.
 
     Unlike /api/events (which only sees the in-memory ring buffer), this
     walks the persisted history file so the debrief browser can query
-    older events from previous sessions.
+    older events from previous sessions. ``limit`` is capped at 2000 (was
+    20000 — a single response materialising 20k JSON dicts was a memory
+    spike big enough to matter on a Pi); bulk pulls belong to the
+    streaming CSV export.
     """
-    path = _event_log.jsonl_path if _event_log is not None else None
+    path = _event_log.history_path if _event_log is not None else None
     if path is None:
         return {"events": [], "limit": limit, "offset": offset, "truncated": False}
-    filters = _history_filters(since, until, src, tgt, types)
-    # The indexed path can materialise up to ``limit`` (= 20k max) JSON-decoded
-    # dicts; the fallback path walks the on-disk JSONL line-by-line. Both are
+    filters = _history_filters(since, until, src, tgt, types, day=day)
+    # The indexed path can materialise up to ``limit`` JSON-decoded dicts;
+    # the fallback path walks the on-disk JSONL line-by-line. Both are
     # synchronous and would block every other coroutine if run on the loop.
-    return await asyncio.to_thread(
+    return await _run_heavy(
         _history_query_sync, path, filters, limit, offset,
     )
 
@@ -341,23 +460,34 @@ async def history_csv(
     src: Optional[int] = Query(None),
     tgt: Optional[int] = Query(None),
     types: Optional[str] = Query(None),
+    day: Optional[str] = Query(None),
 ):
-    path = _event_log.jsonl_path if _event_log is not None else None
+    path = _event_log.history_path if _event_log is not None else None
     if path is None:
         return Response("", media_type="text/csv")
-    filters = _history_filters(since, until, src, tgt, types)
+    filters = _history_filters(since, until, src, tgt, types, day=day)
     idx = _prefer_index()
     if idx is not None:
+        from .event_index import stream_query
+
+        # Flush pending batched appends so the read-only streaming
+        # connection sees rows from the last couple of seconds too.
+        idx.flush()
+
         import csv as _csv
         import io as _io
 
-        def _iter_csv_from_index():
+        def _iter_csv_from_index(db_path=idx.db_path):
             buf = _io.StringIO()
             writer = _csv.DictWriter(buf, fieldnames=CSV_COLUMNS, extrasaction="ignore")
             writer.writeheader()
             yield buf.getvalue()
             buf.seek(0); buf.truncate()
-            for obj in idx.iter_query(**filters):
+            # stream_query walks its own read-only SQLite connection with
+            # fetchmany — O(batch) memory instead of the old fetchall()
+            # that loaded the entire filtered history into RAM before the
+            # first byte went out.
+            for obj in stream_query(db_path, **filters):
                 writer.writerow(_row_from_dict(obj))
                 yield buf.getvalue()
                 buf.seek(0); buf.truncate()
@@ -370,6 +500,177 @@ async def history_csv(
         iterator,
         media_type="text/csv; charset=utf-8",
         headers={"Content-Disposition": f'attachment; filename="{fname}"'},
+    )
+
+
+@app.get("/api/stats/day/{day}")
+async def stats_for_day(day: str):
+    """Historical statistics for one local day, shaped like /api/stats so
+    the stats page reuses its chart rendering. 404 for an empty day."""
+    from .event_log import compute_quality_ratios
+    from .export import is_valid_day
+
+    if not is_valid_day(day):
+        raise HTTPException(status_code=422, detail="day must be YYYY-MM-DD")
+    idx = _prefer_index()
+    if idx is None:
+        raise HTTPException(status_code=404, detail="no event index")
+    data = await _run_heavy(idx.day_stats, day)
+    if data["window_size"] == 0:
+        raise HTTPException(status_code=404, detail=f"no events on {day}")
+    data["quality_ratios"] = compute_quality_ratios(
+        data["events_by_type"], data["quality_by_kind"],
+    )
+    data["day"] = day
+    return data
+
+
+@app.get("/api/days")
+async def list_days():
+    """Days with recorded data — drives the UI day picker and tells the
+    operator what's exportable. Prefers the SQLite ``day`` column
+    (indexed GROUP BY); falls back to listing partition files."""
+    idx = _prefer_index()
+    if idx is not None:
+        return {"days": await asyncio.to_thread(idx.days_summary)}
+    if (
+        _event_log is not None
+        and getattr(_event_log, "partition", False)
+        and _event_log.partition_dir is not None
+    ):
+        from .event_log import _day_from_filename
+
+        def _scan():
+            out = []
+            for p in sorted(_event_log.partition_dir.glob("*.jsonl")):
+                d = _day_from_filename(p)
+                try:
+                    size = p.stat().st_size
+                except OSError:
+                    continue
+                out.append({
+                    "day": d or "unknown",
+                    "events": None,
+                    "voice_events": None,
+                    "first_ts": None,
+                    "last_ts": None,
+                    "bytes": size,
+                })
+            return out
+
+        return {"days": await asyncio.to_thread(_scan)}
+    return {"days": []}
+
+
+@app.get("/api/export")
+async def export_range(
+    day: Optional[str] = Query(None, description="One local day, YYYY-MM-DD"),
+    from_day: Optional[str] = Query(None, alias="from", description="Range start day (inclusive)"),
+    to_day: Optional[str] = Query(None, alias="to", description="Range end day (inclusive)"),
+    format: str = Query("ndjson", pattern="^(ndjson|csv)$"),
+    types: Optional[str] = Query(None),
+    src: Optional[int] = Query(None),
+    tgt: Optional[int] = Query(None),
+):
+    """Structured export of a day or an inclusive day range.
+
+    NDJSON of a single unfiltered day streams the raw partition file
+    byte-for-byte (the file IS the export); everything else streams
+    through the read-only SQLite cursor (or the JSONL fallback) with
+    O(batch) memory. 404 when the index knows the range is empty.
+    """
+    import json as _json
+
+    from .export import is_valid_day
+
+    if day:
+        if not is_valid_day(day):
+            raise HTTPException(status_code=422, detail="day must be YYYY-MM-DD")
+        day_from, day_to = day, day
+    elif from_day and to_day:
+        if not (is_valid_day(from_day) and is_valid_day(to_day)):
+            raise HTTPException(status_code=422, detail="from/to must be YYYY-MM-DD")
+        if from_day > to_day:
+            raise HTTPException(status_code=422, detail="from must be <= to")
+        day_from, day_to = from_day, to_day
+    else:
+        raise HTTPException(
+            status_code=422,
+            detail="specify day=YYYY-MM-DD, or from= and to=",
+        )
+
+    type_list = [t.strip() for t in types.split(",") if t.strip()] if types else None
+    filtered = bool(type_list or src is not None or tgt is not None)
+    label = day_from if day_from == day_to else f"{day_from}_{day_to}"
+
+    # Fast path: the day file itself is already exactly the export.
+    if (
+        format == "ndjson" and not filtered and day_from == day_to
+        and _event_log is not None and getattr(_event_log, "partition", False)
+    ):
+        p = _event_log.day_file(day_from)
+        if p.exists():
+            return FileResponse(
+                p,
+                media_type="application/x-ndjson",
+                filename=f"dmr_{label}.ndjson",
+            )
+
+    idx = _prefer_index()
+    if idx is not None:
+        from .event_index import stream_query
+
+        idx.flush()
+        n = await _run_heavy(
+            idx.count, types=type_list, src=src, tgt=tgt,
+            day_from=day_from, day_to=day_to,
+        )
+        if n == 0:
+            raise HTTPException(status_code=404, detail=f"no events for {label}")
+        row_iter = stream_query(
+            idx.db_path, src=src, tgt=tgt, types=type_list,
+            day_from=day_from, day_to=day_to,
+        )
+    else:
+        path = _event_log.history_path if _event_log is not None else None
+        if path is None or not path.exists():
+            raise HTTPException(status_code=404, detail="no event history")
+        row_iter = stream_history(
+            path, src=src, tgt=tgt, types=type_list,
+            day_from=day_from, day_to=day_to,
+        )
+
+    if format == "ndjson":
+        def _ndjson():
+            for obj in row_iter:
+                yield _json.dumps(obj, separators=(",", ":")) + "\n"
+
+        return StreamingResponse(
+            _ndjson(),
+            media_type="application/x-ndjson",
+            headers={"Content-Disposition":
+                     f'attachment; filename="dmr_{label}.ndjson"'},
+        )
+
+    import csv as _csv
+    import io as _io
+
+    def _csv_iter():
+        buf = _io.StringIO()
+        writer = _csv.DictWriter(buf, fieldnames=CSV_COLUMNS, extrasaction="ignore")
+        writer.writeheader()
+        yield buf.getvalue()
+        buf.seek(0); buf.truncate()
+        for obj in row_iter:
+            writer.writerow(_row_from_dict(obj))
+            yield buf.getvalue()
+            buf.seek(0); buf.truncate()
+
+    return StreamingResponse(
+        _csv_iter(),
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition":
+                 f'attachment; filename="dmr_{label}.csv"'},
     )
 
 
@@ -393,7 +694,7 @@ async def radio_dossier(
     # Off-loop: build_dossier can pull tens of thousands of rows on a busy
     # 24h window. Running it synchronously inside the async handler would
     # block the event loop and freeze the live WebSocket feed.
-    result = await asyncio.to_thread(
+    result = await _run_heavy(
         build_dossier,
         idx, radio_id, window_seconds=window,
         recordings=_recordings, radio_state=radio_state,
@@ -425,7 +726,7 @@ async def network_graph(
     # rows and runs an O(n) classification + O(pairs) accumulation in
     # Python. Doing it synchronously freezes every other request,
     # including the live snapshot WebSocket.
-    return await asyncio.to_thread(
+    return await _run_heavy(
         compute_talker_pairs,
         idx, window_seconds=window, min_weight=min_weight, limit=limit,
     )
@@ -433,17 +734,17 @@ async def network_graph(
 
 @app.get("/network")
 async def network_page():
-    return HTMLResponse((FRONTEND_DIR / "network.html").read_text(encoding="utf-8"))
+    return _page("network.html")
 
 
 @app.get("/stats")
 async def stats_page():
-    return HTMLResponse((FRONTEND_DIR / "stats.html").read_text(encoding="utf-8"))
+    return _page("stats.html")
 
 
 @app.get("/debrief")
 async def debrief_page():
-    return HTMLResponse((FRONTEND_DIR / "debrief.html").read_text(encoding="utf-8"))
+    return _page("debrief.html")
 
 
 @app.get("/recordings/{filename}")
@@ -541,8 +842,31 @@ async def ws_alerts(websocket: WebSocket):
 
 
 @app.post("/api/reset")
-async def reset_all_data():
-    """Erase all accumulated state: radios, events, SQLite index, and snapshot file."""
+async def reset_all_data(
+    request: Request,
+    x_reset_token: Optional[str] = Header(None),
+):
+    """Erase all accumulated state: radios, events, SQLite index, and snapshot file.
+
+    Destructive and previously unauthenticated — anyone who could reach
+    the port could wipe weeks of data. Now: when ``--reset-token`` is
+    configured the ``X-Reset-Token`` header must match; without a token
+    only loopback clients may reset.
+    """
+    if _reset_token is not None:
+        if x_reset_token != _reset_token:
+            raise HTTPException(
+                status_code=403,
+                detail="invalid or missing X-Reset-Token header",
+            )
+    else:
+        client_host = request.client.host if request.client else None
+        if client_host not in ("127.0.0.1", "::1", "localhost"):
+            raise HTTPException(
+                status_code=403,
+                detail="reset is only allowed from localhost unless "
+                       "--reset-token is configured",
+            )
     if _state is not None:
         _state.reset()
     if _event_log is not None:
@@ -559,7 +883,7 @@ async def reset_all_data():
 
 @app.get("/alerts")
 async def alerts_page():
-    return HTMLResponse((FRONTEND_DIR / "alerts.html").read_text(encoding="utf-8"))
+    return _page("alerts.html")
 
 
 @app.websocket("/ws")
@@ -568,8 +892,17 @@ async def ws_endpoint(websocket: WebSocket):
     q: asyncio.Queue = asyncio.Queue(maxsize=10)
     _subscribers.add(q)
     try:
-        if _state is not None:
-            await websocket.send_text(_state.snapshot().model_dump_json())
+        # First frame: reuse the broadcast payload (already serialised)
+        # instead of re-serialising the full snapshot per new connection.
+        if _broadcast_payload is not None:
+            await websocket.send_text(_broadcast_payload)
+        elif _state is not None:
+            sm = _state
+            await websocket.send_text(
+                await asyncio.to_thread(
+                    lambda: sm.snapshot(trim=True).model_dump_json()
+                )
+            )
         while True:
             try:
                 data = await asyncio.wait_for(q.get(), timeout=30.0)
@@ -598,5 +931,4 @@ async def ws_endpoint(websocket: WebSocket):
 
 @app.get("/")
 async def index():
-    html_path = FRONTEND_DIR / "index.html"
-    return HTMLResponse(html_path.read_text(encoding="utf-8"))
+    return _page("index.html")

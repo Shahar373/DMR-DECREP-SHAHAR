@@ -3,14 +3,21 @@ Description=DMR Cap+ Monitor Dashboard
 After=network.target
 
 [Service]
+# Adjust WorkingDirectory/ExecStart paths to your checkout location.
 WorkingDirectory=/home/shahar/DMR-DECREP-SHAHAR
+# Direct SDR control (no SDRconnect / virtual cable) — set --frequency to
+# your Cap+ channel. Prereqs: bash scripts/setup-sdrplay.sh
 ExecStart=/home/shahar/DMR-DECREP-SHAHAR/.venv/bin/python -m backend.cli \
     --live \
-    --input pulse:dmr_capture.monitor \
+    --rf-backend soapy \
+    --frequency 168.5M \
     --calls-dir /tmp/dmr_calls \
     --serve \
     --port 8080 \
-    --event-retention-hours 48
+    --retention-days 7
+# Legacy audio-cable chain (SDRconnect + dmr_capture sink) — swap the two
+# RF lines above for:
+#     --input pulse:dmr_capture.monitor \
 Restart=on-failure
 RestartSec=10s
 # Prevent a crash-loop from hammering the system: allow at most 5 restarts

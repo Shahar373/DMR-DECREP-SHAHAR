@@ -94,6 +94,10 @@ class Radio(BaseModel):
     last_position: Optional[Position] = None
     # Recent positions for drawing a movement trail on the map; capped to N.
     position_history: list[Position] = Field(default_factory=list)
+    # RF channel this radio was last heard on (multi-frequency mode);
+    # None in single-channel mode. Additive.
+    last_channel: Optional[str] = None
+    last_frequency: Optional[float] = None
 
 
 class ActiveCall(BaseModel):
@@ -109,6 +113,9 @@ class ActiveCall(BaseModel):
     frame_count: int = 1
     is_encrypted: bool = False
     rest_lsn: Optional[int] = None
+    # RF channel this call is on (multi-frequency mode); None single-channel.
+    channel_label: Optional[str] = None
+    frequency: Optional[float] = None
 
 
 class LSNStateSnapshot(BaseModel):
@@ -137,10 +144,22 @@ class DashboardSnapshot(BaseModel):
     """JSON-serializable view of the entire dashboard state."""
 
     radios: dict[int, Radio]
-    active_calls: dict[int, ActiveCall]
+    # Keyed by slot (single-channel, int) or "<channel>:<slot>" (multi-
+    # frequency). Typed str so both coexist; JSON keys were always strings
+    # anyway, so the wire format is unchanged for single-channel clients.
+    active_calls: dict[str, ActiveCall]
     system: SystemStatus
     quality: QualityCounters
     generated_at: datetime
+    # Total radios known to the StateManager. In a trimmed broadcast
+    # snapshot ``len(radios)`` may be smaller than this — the UI shows
+    # "N of M" so the operator knows rows were omitted for payload size.
+    # Additive field (defaults for old persisted snapshots).
+    radios_total: int = 0
+    # Radios evicted from live state by the --max-radios LRU cap. Their
+    # history stays queryable via /api/history and /api/radio/{id} — this
+    # counter lets the UI say "N archived". Additive field.
+    radios_evicted_total: int = 0
 
 
 # ---------------------------------------------------------------------------
@@ -155,6 +174,9 @@ class StateManager:
         position_history_length: int = 50,
         on_call_start: Optional[Callable[[ActiveCall], None]] = None,
         on_call_end: Optional[Callable[[ActiveCall], None]] = None,
+        broadcast_max_radios: int = 2000,
+        broadcast_trail_max_age: timedelta = timedelta(minutes=15),
+        max_radios: int = 2000,
     ) -> None:
         self.radios: dict[int, Radio] = {}
         self.active_calls: dict[int, ActiveCall] = {}
@@ -165,12 +187,31 @@ class StateManager:
         self._last_event_at: Optional[datetime] = None
         self._on_call_start = on_call_start
         self._on_call_end = on_call_end
+        # Channel context of the event currently being applied (multi-
+        # frequency mode). Captured in apply() so per-event handlers can
+        # stamp radios/calls without threading it through every signature.
+        self._cur_channel_label: Optional[str] = None
+        self._cur_frequency: Optional[float] = None
+        # Trim policy for broadcast (WS / /api/snapshot) payloads — the
+        # persisted snapshot.json always uses the full, untrimmed view.
+        self._broadcast_max_radios = broadcast_max_radios
+        self._broadcast_trail_max_age = broadcast_trail_max_age
+        # Hard cap on live radios. The dict used to grow with every
+        # distinct radio id ever heard (persisted across restarts via
+        # snapshot.json), which made snapshot serialisation — and thus the
+        # 1 Hz broadcast — steadily more expensive forever. LRU by
+        # last_seen; evicted radios remain fully queryable in SQLite.
+        self._max_radios = max_radios
+        self.radios_evicted_total = 0
 
     # --- public API ---
 
     def apply(self, event: Event) -> None:
         self.quality.total_events_seen += 1
         self._last_event_at = event.timestamp
+        # Channel context for the handlers (None in single-channel mode).
+        self._cur_channel_label = getattr(event, "channel_label", None)
+        self._cur_frequency = getattr(event, "frequency", None)
 
         # Auto-tick BEFORE the handler so a voice frame arriving after a long
         # gap sees the stale call as already expired and starts a fresh one
@@ -210,18 +251,60 @@ class StateManager:
         self.system = SystemStatus()
         self.quality = QualityCounters()
         self._last_event_at = None
+        self.radios_evicted_total = 0
 
     def tick(self, now: datetime) -> None:
         """Manually expire idle calls — useful when no events are flowing."""
         self._expire_idle_calls(now)
 
-    def snapshot(self) -> DashboardSnapshot:
+    def snapshot(self, trim: bool = False) -> DashboardSnapshot:
+        """Build a snapshot view of current state.
+
+        ``trim=False`` (default) is the full view used for persistence and
+        existing callers — every radio, full position trails.
+
+        ``trim=True`` is the broadcast view for the 1 Hz WebSocket push and
+        ``/api/snapshot``: the payload was previously unbounded (it grows
+        with every distinct radio id ever heard × up to 50 trail points
+        each) and was re-serialised on the event loop, which is the main
+        "dashboard freezes under load" failure mode. Trimming caps radios
+        at ``broadcast_max_radios`` (newest ``last_seen`` first) and drops
+        ``position_history`` for radios whose last GPS fix is older than
+        ``broadcast_trail_max_age``. ``radios_total`` always carries the
+        real count so the UI can say "showing N of M".
+        """
+        radios: dict[int, Radio]
+        if not trim:
+            radios = dict(self.radios)
+        else:
+            now = self._last_event_at or datetime.now()
+            source = self.radios
+            if len(source) > self._broadcast_max_radios:
+                keep = sorted(
+                    source.values(), key=lambda r: r.last_seen, reverse=True,
+                )[: self._broadcast_max_radios]
+                source = {r.id: r for r in keep}
+            radios = {}
+            for rid, radio in source.items():
+                trail_fresh = (
+                    radio.last_position is not None
+                    and now - radio.last_position.at <= self._broadcast_trail_max_age
+                )
+                if radio.position_history and not trail_fresh:
+                    radio = radio.model_copy(update={"position_history": []})
+                radios[rid] = radio
         return DashboardSnapshot(
-            radios=dict(self.radios),
-            active_calls=dict(self.active_calls),
+            radios=radios,
+            # Internal keys are bare int slots (single-channel) or
+            # "<channel>:<slot>" strings (multi-frequency); stringify so
+            # both fit the str-keyed field. Wire format is unchanged
+            # (JSON keys were always strings).
+            active_calls={str(k): v for k, v in self.active_calls.items()},
             system=self.system,
             quality=self.quality,
             generated_at=self._last_event_at or datetime.now(),
+            radios_total=len(self.radios),
+            radios_evicted_total=self.radios_evicted_total,
         )
 
     def load_snapshot(self, path) -> bool:
@@ -252,6 +335,11 @@ class StateManager:
             self.radios = dict(snap.radios)
             self.system = snap.system
             self.quality = snap.quality
+            self.radios_evicted_total = snap.radios_evicted_total
+            # Enforce the cap on restore too — a fat legacy snapshot.json
+            # from before the LRU cap must not resurrect an oversized dict.
+            if len(self.radios) > self._max_radios:
+                self._evict_radios()
             # active_calls intentionally skipped — they expired during downtime.
             # _last_event_at is left None so the next real event sets it fresh.
             return True
@@ -267,15 +355,46 @@ class StateManager:
 
     # --- helpers ---
 
+    def _call_key(self, slot: int):
+        """Active-call dict key: the bare slot (int) in single-channel mode
+        so nothing changes, or ``"<channel>:<slot>"`` when a channel is set,
+        so two frequencies' slot-1 calls don't collide."""
+        if self._cur_channel_label is None:
+            return slot
+        return f"{self._cur_channel_label}:{slot}"
+
     def _touch_radio(self, radio_id: int, ts: datetime) -> Radio:
         radio = self.radios.get(radio_id)
         if radio is None:
             radio = Radio(id=radio_id, first_seen=ts, last_seen=ts)
             self.radios[radio_id] = radio
+            if len(self.radios) > self._max_radios:
+                self._evict_radios()
         else:
             if ts > radio.last_seen:
                 radio.last_seen = ts
+        if self._cur_channel_label is not None:
+            radio.last_channel = self._cur_channel_label
+            radio.last_frequency = self._cur_frequency
         return radio
+
+    def _evict_radios(self) -> None:
+        """Batch-evict the ~5% oldest radios by last_seen.
+
+        Batched so the O(n log n) sort runs once per ~5% of the cap's
+        worth of new radios, not on every single insert past the cap.
+        """
+        overshoot = len(self.radios) - self._max_radios
+        if overshoot <= 0:
+            return
+        batch = max(overshoot, self._max_radios // 20, 1)
+        batch = min(batch, len(self.radios))
+        oldest = sorted(
+            self.radios.values(), key=lambda r: r.last_seen,
+        )[:batch]
+        for radio in oldest:
+            del self.radios[radio.id]
+        self.radios_evicted_total += len(oldest)
 
     def _expire_idle_calls(self, now: datetime) -> None:
         expired = [
@@ -305,7 +424,8 @@ class StateManager:
         radio.last_tg = ev.tgt
         radio.last_slot = ev.slot
 
-        existing = self.active_calls.get(ev.slot)
+        key = self._call_key(ev.slot)
+        existing = self.active_calls.get(key)
         if existing is not None and existing.src == ev.src and existing.tgt == ev.tgt:
             existing.last_frame_at = ev.timestamp
             existing.frame_count += 1
@@ -329,8 +449,10 @@ class StateManager:
                 started_at=ev.timestamp,
                 last_frame_at=ev.timestamp,
                 rest_lsn=ev.rest_lsn,
+                channel_label=self._cur_channel_label,
+                frequency=self._cur_frequency,
             )
-            self.active_calls[ev.slot] = new_call
+            self.active_calls[key] = new_call
             if self._on_call_start is not None:
                 try:
                     self._on_call_start(new_call)
@@ -365,7 +487,7 @@ class StateManager:
         self._touch_radio(ev.tgt, ev.timestamp)
 
     def _on_encryption(self, ev: EncryptionEvent) -> None:
-        call = self.active_calls.get(ev.slot)
+        call = self.active_calls.get(self._call_key(ev.slot))
         if call is not None:
             call.is_encrypted = True
             radio = self.radios.get(call.src)

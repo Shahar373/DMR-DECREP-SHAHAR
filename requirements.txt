@@ -5,3 +5,7 @@ uvicorn[standard]>=0.29,<1
 # Required by fastapi.testclient.TestClient (starlette uses httpx as its
 # test transport). Without it the server/API tests fail to even collect.
 httpx>=0.27,<1
+# DSP for multi-frequency capture (Phase 7): wideband IQ → per-channel
+# FM audio. Only imported by backend/rf/channelizer.py — the rest of the
+# app runs without it. piwheels provides an ARM build for the Pi.
+numpy>=1.24,<3

@@ -26,9 +26,14 @@ from typing import Optional
 
 
 def _safe_stat_size(path: Optional[Path]) -> Optional[int]:
+    """File size; for a day-partition directory, the sum of its JSONLs."""
     if path is None:
         return None
     try:
+        if path.is_dir():
+            return sum(
+                p.stat().st_size for p in path.glob("*.jsonl") if p.is_file()
+            )
         return path.stat().st_size
     except OSError:
         return None

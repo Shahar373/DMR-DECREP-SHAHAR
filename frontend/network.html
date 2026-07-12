@@ -5,26 +5,20 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>DMR Cap+ — Talker Network</title>
 <script src="https://cdn.jsdelivr.net/npm/cytoscape@3.30.0/dist/cytoscape.min.js"></script>
+<link rel="stylesheet" href="/assets/style.css">
+<script src="/assets/shared.js" defer></script>
 <style>
 * { box-sizing: border-box; margin: 0; padding: 0; }
-:root {
-  --bg: #0d1117; --bg2: #161b22; --bg3: #21262d; --border: #30363d;
-  --text: #e6edf3; --muted: #8b949e;
-  --green: #3fb950; --blue: #58a6ff; --yellow: #d29922;
-  --red: #f85149; --purple: #bc8cff; --orange: #f0883e;
-}
+/* Tokens (--bg, --blue, ...) come from /assets/style.css. */
 body { font-family: ui-monospace, 'Cascadia Code', monospace;
        background: var(--bg); color: var(--text); font-size: 13px;
        min-height: 100vh; overflow: hidden; }
 header {
   background: var(--bg2); border-bottom: 1px solid var(--border);
   padding: 10px 16px; display: flex; align-items: center; gap: 16px;
+  flex-wrap: wrap;
 }
 header h1 { font-size: 14px; font-weight: 700; color: var(--blue); }
-header .nav a {
-  color: var(--muted); text-decoration: none; margin-right: 12px; font-size: 12px;
-}
-header .nav a:hover, header .nav a.active { color: var(--blue); }
 header .meta { margin-left: auto; color: var(--muted); font-size: 11px; }
 header .meta span { color: var(--text); }
 
@@ -76,17 +70,11 @@ header .meta span { color: var(--text); }
 #status { color: var(--muted); font-size: 11px; margin-top: 8px; }
 </style>
 </head>
-<body>
+<body class="page-network">
 
 <header>
   <h1>DMR Cap+ Talker Network</h1>
-  <nav class="nav">
-    <a href="/">Live</a>
-    <a href="/debrief">Debrief</a>
-    <a href="/stats">Stats</a>
-    <a href="/network" class="active">Network</a>
-    <a href="/alerts">Alerts</a>
-  </nav>
+  <nav class="nav" data-shared-nav></nav>
   <div class="meta">
     Nodes: <span id="m-nodes">—</span> ·
     Edges: <span id="m-edges">—</span> ·
@@ -163,6 +151,10 @@ cy.on('tap', 'node', evt => {
   window.location = '/?dossier=' + encodeURIComponent(id);
 });
 
+let lastSignature = null;
+// Keep the canvas sized correctly across orientation/viewport changes.
+window.addEventListener('resize', () => { cy.resize(); });
+
 async function refresh() {
   const w = $('f-window').value;
   const m = $('f-min').value;
@@ -190,9 +182,21 @@ async function refresh() {
         kind: e.kind, weight: e.weight, width, tgs: e.tgs.join(','),
     }});
   }
-  cy.elements().remove();
-  cy.add(els);
-  cy.layout({ name: 'cose', animate: false, idealEdgeLength: 110, nodeRepulsion: 8000 }).run();
+  // Re-running the cose force layout is the most expensive step on this
+  // page (very visible on mobile CPUs). Skip it when the graph topology
+  // hasn't changed — only weights/sizes get updated in place then.
+  const signature = els.map(e => e.data.id).sort().join('|');
+  if (signature === lastSignature) {
+    for (const e of els) {
+      const existing = cy.getElementById(e.data.id);
+      if (existing.length) existing.data(e.data);
+    }
+  } else {
+    lastSignature = signature;
+    cy.elements().remove();
+    cy.add(els);
+    cy.layout({ name: 'cose', animate: false, idealEdgeLength: 110, nodeRepulsion: 8000 }).run();
+  }
 
   // Side list: top 25 edges.
   const list = $('edges-list');
