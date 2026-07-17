@@ -9,6 +9,54 @@ Versioning follows [Semantic Versioning](https://semver.org/):
 Source of truth: `backend/__init__.py` (`__version__`). The dashboard
 footer shows the running build's version and `/api/version` exposes it.
 
+## [0.26.4] — 2026-07-17
+
+### Changed
+
+- `--port` default moved from **8080 to 8081**, in `backend/cli.py`,
+  `scripts/dmr-monitor.service`, and `README.md`. This repo is now the
+  reference/engine source for the `DMR` project's Phase 2 merge (see
+  `scripts/spike_multichannel.sh`'s 0.26.2 entry) — `DMR`'s `dmr-web.service`
+  is the always-on production app on 8080 when both projects run on the same
+  Pi. The spike script already avoided this collision with an explicit
+  override; this change makes the CLI itself collision-safe by default so a
+  bare `--serve` (no `--port`) can never clash with DMR again.
+
+## [0.26.3] — 2026-07-17
+
+### Fixed
+
+- `scripts/setup-sdrplay.sh` never installed the SoapySDR **python**
+  bindings (`python3-soapysdr`) — it only verified the `SoapySDRUtil` CLI
+  and the sdrplay driver module. First real run of
+  `scripts/spike_multichannel.sh` on a Pi 5 + RSP1B hit exactly this:
+  device found fine by `SoapySDRUtil --find`, but `import SoapySDR` failed
+  inside the `.venv` created per the README (which, without
+  `--system-site-packages`, can't see apt-installed system bindings even
+  after they're present). Added an explicit "1b" apt-install step, plus
+  guidance on the `pyvenv.cfg` `include-system-site-packages` flip that
+  fixes this without recreating the venv.
+- `scripts/spike_multichannel.sh` — preflight now auto-detects this exact
+  case (system python3 has `SoapySDR`, the `.venv` doesn't) and flips
+  `include-system-site-packages` in the existing `.venv/pyvenv.cfg` in
+  place, falling back to system `python3` if that still doesn't resolve
+  it. Preflight failure message for the SoapySDR check now names the apt
+  package directly instead of just pointing at the setup script.
+
+## [0.26.2] — 2026-07-17
+
+### Added
+
+- `scripts/spike_multichannel.sh` — Phase 0 hardware spike for the planned
+  DMR ⨯ DMR-DECREP merge. Runs `--channel-plan` (optionally
+  `--follow-traffic`) live on a real Pi 5 + RSP1B and measures the one
+  thing CI can't: per-process CPU (from `/proc` jiffy deltas, not `ps`
+  lifetime averages), tree RSS, live dsd-fme count, and decoded-event
+  count (sync-lock evidence). Prints a verdict on whether simultaneous
+  multi-channel decode is viable and how many channels hold real-time.
+  Runs on port 8081 to avoid colliding with the DMR web app on 8080.
+  Pure tooling — no product code touched.
+
 ## [0.26.1] — 2026-07-12
 
 ### Fixed
