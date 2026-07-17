@@ -7,13 +7,16 @@ After=network.target
 WorkingDirectory=/home/shahar/DMR-DECREP-SHAHAR
 # Direct SDR control (no SDRconnect / virtual cable) — set --frequency to
 # your Cap+ channel. Prereqs: bash scripts/setup-sdrplay.sh
+# Port 8081, NOT 8080: this repo is the reference/engine source for the
+# DMR ⨯ DMR-DECREP merge (see CHANGELOG "Phase 0"/"Phase 2") — DMR's own
+# dmr-web.service is the always-on production app on 8080 on the same Pi.
 ExecStart=/home/shahar/DMR-DECREP-SHAHAR/.venv/bin/python -m backend.cli \
     --live \
     --rf-backend soapy \
     --frequency 168.5M \
     --calls-dir /tmp/dmr_calls \
     --serve \
-    --port 8080 \
+    --port 8081 \
     --retention-days 7
 # Legacy audio-cable chain (SDRconnect + dmr_capture sink) — swap the two
 # RF lines above for:

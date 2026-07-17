@@ -5,7 +5,8 @@ Two modes:
   python -m backend.cli --live [--serve]
       Spawn dsd-fme, stream its stderr through parser + state manager, write
       a periodic snapshot to snapshot.json. With --serve also runs a FastAPI
-      server (WebSocket + browser UI) on --port (default 8080).
+      server (WebSocket + browser UI) on --port (default 8081 -- NOT 8080,
+      which is reserved for DMR's dmr-web.service when both run on one Pi).
 
   python -m backend.cli --replay FILE [--serve]
       Same pipeline, but read lines from a captured log instead.
@@ -600,8 +601,10 @@ def _parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
 
     p.add_argument("--serve", action="store_true",
                    help="start FastAPI WebSocket server and browser UI")
-    p.add_argument("--port", type=int, default=8080,
-                   help="HTTP/WebSocket port when --serve is used (default: %(default)s)")
+    p.add_argument("--port", type=int, default=8081,
+                   help="HTTP/WebSocket port when --serve is used (default: %(default)s "
+                        "-- kept off 8080, which DMR's dmr-web.service occupies "
+                        "when both projects run on the same Pi)")
     p.add_argument("--calls-dir", default="/tmp/dmr_calls",
                    help="directory dsd-fme writes per-call WAVs into (default: %(default)s)")
     p.add_argument("--event-log", default="events.jsonl",

@@ -9,6 +9,19 @@ Versioning follows [Semantic Versioning](https://semver.org/):
 Source of truth: `backend/__init__.py` (`__version__`). The dashboard
 footer shows the running build's version and `/api/version` exposes it.
 
+## [0.26.4] — 2026-07-17
+
+### Changed
+
+- `--port` default moved from **8080 to 8081**, in `backend/cli.py`,
+  `scripts/dmr-monitor.service`, and `README.md`. This repo is now the
+  reference/engine source for the `DMR` project's Phase 2 merge (see
+  `scripts/spike_multichannel.sh`'s 0.26.2 entry) — `DMR`'s `dmr-web.service`
+  is the always-on production app on 8080 when both projects run on the same
+  Pi. The spike script already avoided this collision with an explicit
+  override; this change makes the CLI itself collision-safe by default so a
+  bare `--serve` (no `--port`) can never clash with DMR again.
+
 ## [0.26.3] — 2026-07-17
 
 ### Fixed

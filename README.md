@@ -106,12 +106,15 @@ will replace this with a WebSocket feed.
 .venv/bin/python -m backend.cli --live \
     --input pulse:dmr_capture.monitor \
     --calls-dir /tmp/dmr_calls \
-    --serve --port 8080
+    --serve --port 8081
 ```
 
 dsd-fme records each call as a WAV under `--calls-dir` automatically; the
-dashboard is served at `http://<pi>:8080/`. (This is the same invocation the
-systemd unit in `scripts/dmr-monitor.service` uses.)
+dashboard is served at `http://<pi>:8081/`. (This is the same invocation the
+systemd unit in `scripts/dmr-monitor.service` uses.) Port 8081, not 8080:
+this repo is now the reference/engine source for a merge into the `DMR`
+project, whose `dmr-web.service` is the always-on production app on 8080
+when both run on the same Pi.
 
 To watch state without the dashboard, in another terminal:
 ```bash
@@ -129,7 +132,7 @@ Ctrl+C stops dsd-fme cleanly and writes a final snapshot.
 --input DEV                 dsd-fme -i input device (live, default pulse:dmr_capture.monitor)
 --dsd-bin PATH              path to dsd-fme binary (default: dsd-fme)
 --serve                     start the FastAPI WebSocket server + browser UI
---port N                    HTTP/WebSocket port for --serve (default 8080)
+--port N                    HTTP/WebSocket port for --serve (default 8081)
 --calls-dir DIR             where dsd-fme writes per-call WAVs (default /tmp/dmr_calls)
 --snapshot PATH             where to write periodic JSON state (default snapshot.json)
 --snapshot-interval SEC     snapshot write interval (default 1.0)
