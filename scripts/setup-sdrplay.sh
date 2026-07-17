@@ -27,6 +27,22 @@ else
         || { echo "  $FAIL apt install failed — run: sudo apt install soapysdr-tools libsoapysdr-dev"; fails=$((fails+1)); }
 fi
 
+step "1b. SoapySDR python bindings (apt)"
+if python3 -c "import SoapySDR" >/dev/null 2>&1; then
+    echo "  $PASS python3 already sees SoapySDR"
+else
+    echo "  installing python3-soapysdr..."
+    sudo apt-get install -y python3-soapysdr >/dev/null 2>&1 \
+        && echo "  $PASS installed" \
+        || { echo "  $FAIL apt install failed — run: sudo apt install python3-soapysdr"; fails=$((fails+1)); }
+    echo "  note: apt installs bindings for system python3 only. A venv"
+    echo "        created WITHOUT --system-site-packages (e.g. via the"
+    echo "        README's 'python3 -m venv .venv') won't see them — either"
+    echo "        recreate with --system-site-packages, or flip"
+    echo "        'include-system-site-packages = false' to 'true' in"
+    echo "        .venv/pyvenv.cfg (no need to recreate the venv)."
+fi
+
 step "2. SDRplay API service (proprietary — manual download)"
 if pgrep -x sdrplay_apiService >/dev/null 2>&1; then
     echo "  $PASS sdrplay_apiService is running"

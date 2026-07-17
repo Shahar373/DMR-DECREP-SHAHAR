@@ -30,11 +30,32 @@ SAMPLE_INTERVAL="${SAMPLE_INTERVAL:-1}"
 FOLLOW="${FOLLOW:-0}"              # 1 → הרצה שנייה עם --follow-traffic להשוואה
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 VENV_PY="$REPO_ROOT/.venv/bin/python"
+VENV_CFG="$REPO_ROOT/.venv/pyvenv.cfg"
 OUT_DIR="$(mktemp -d /tmp/dmr_spike.XXXXXX)"
 NPROC="$(nproc 2>/dev/null || echo 4)"
 
 cd "$REPO_ROOT" || { echo "לא נמצא שורש הריפו"; exit 1; }
 [ -x "$VENV_PY" ] || VENV_PY="python3"   # נפילה חיננית ל-python3 אם אין venv
+
+# ── תיקון אוטומטי: python3-soapysdr קיים במערכת אבל ה-venv עיוור לו ─────────
+# apt מתקין את ה-binding של SoapySDR ל-python של המערכת בלבד; venv שנוצר
+# בלי --system-site-packages (כמו זה שה-README מנחה ליצור) לא רואה אותו.
+# אם זה המצב, מדליקים include-system-site-packages בקובץ ה-cfg הקיים —
+# זה משפיע מיד (לא דורש יצירה מחדש של ה-venv) ומשאיר את חבילות ה-venv
+# (fastapi/pydantic/וכו') כפי שהן, רק *מוסיף* גישה לחבילות המערכת.
+if [ -x "$VENV_PY" ] && [ -f "$VENV_CFG" ]; then
+  if ! "$VENV_PY" -c "import SoapySDR" >/dev/null 2>&1 \
+     && python3 -c "import SoapySDR" >/dev/null 2>&1 \
+     && grep -q "include-system-site-packages = false" "$VENV_CFG" 2>/dev/null; then
+    echo "⚙ python3-soapysdr נמצא במערכת אך לא ב-.venv — מפעיל system-site-packages ב-.venv/pyvenv.cfg"
+    sed -i 's/include-system-site-packages = false/include-system-site-packages = true/' "$VENV_CFG"
+    if ! "$VENV_PY" -c "import SoapySDR" >/dev/null 2>&1; then
+      echo "  ⚠ עדיין לא רואה — חוזר להפעלת ה-cfg המקורי ונופל ל-python3 המערכתי"
+      sed -i 's/include-system-site-packages = true/include-system-site-packages = false/' "$VENV_CFG"
+      VENV_PY="python3"
+    fi
+  fi
+fi
 
 echo "════════════════════════════════════════════════════════════════"
 echo "  ספייק ריבוי-ערוצים — DMR-DECREP על חומרה אמיתית"
@@ -49,7 +70,7 @@ echo; echo "── בדיקות מקדימות ──"
 check() { printf "  %-28s " "$1"; if eval "$2" >/dev/null 2>&1; then echo "✓"; else echo "✗  ($3)"; fail=1; fi; }
 check "python + backend"     "$VENV_PY -c 'import backend'" "הרץ מתוך שורש הריפו, ודא .venv"
 check "numpy"                "$VENV_PY -c 'import numpy'"    "pip install numpy"
-check "SoapySDR (python)"    "$VENV_PY -c 'import SoapySDR'" "צריך SoapySDR — ר' scripts/setup-sdrplay.sh"
+check "SoapySDR (python)"    "$VENV_PY -c 'import SoapySDR'" "sudo apt install python3-soapysdr; אם עדיין נכשל אחרי .venv → נסה PORT.. עם python3 מערכתי (ר' README)"
 check "dsd-fme בנתיב"        "command -v dsd-fme"           "בנה מ-lwvmobile/dsd-fme"
 check "SoapySDRUtil"         "command -v SoapySDRUtil"      "התקנת SoapySDR חסרה"
 echo "  ── מכשירי SDR שנראים ל-Soapy: ──"

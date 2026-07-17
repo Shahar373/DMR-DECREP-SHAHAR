@@ -9,6 +9,27 @@ Versioning follows [Semantic Versioning](https://semver.org/):
 Source of truth: `backend/__init__.py` (`__version__`). The dashboard
 footer shows the running build's version and `/api/version` exposes it.
 
+## [0.26.3] — 2026-07-17
+
+### Fixed
+
+- `scripts/setup-sdrplay.sh` never installed the SoapySDR **python**
+  bindings (`python3-soapysdr`) — it only verified the `SoapySDRUtil` CLI
+  and the sdrplay driver module. First real run of
+  `scripts/spike_multichannel.sh` on a Pi 5 + RSP1B hit exactly this:
+  device found fine by `SoapySDRUtil --find`, but `import SoapySDR` failed
+  inside the `.venv` created per the README (which, without
+  `--system-site-packages`, can't see apt-installed system bindings even
+  after they're present). Added an explicit "1b" apt-install step, plus
+  guidance on the `pyvenv.cfg` `include-system-site-packages` flip that
+  fixes this without recreating the venv.
+- `scripts/spike_multichannel.sh` — preflight now auto-detects this exact
+  case (system python3 has `SoapySDR`, the `.venv` doesn't) and flips
+  `include-system-site-packages` in the existing `.venv/pyvenv.cfg` in
+  place, falling back to system `python3` if that still doesn't resolve
+  it. Preflight failure message for the SoapySDR check now names the apt
+  package directly instead of just pointing at the setup script.
+
 ## [0.26.2] — 2026-07-17
 
 ### Added
