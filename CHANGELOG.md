@@ -9,6 +9,20 @@ Versioning follows [Semantic Versioning](https://semver.org/):
 Source of truth: `backend/__init__.py` (`__version__`). The dashboard
 footer shows the running build's version and `/api/version` exposes it.
 
+## [0.26.2] — 2026-07-17
+
+### Added
+
+- `scripts/spike_multichannel.sh` — Phase 0 hardware spike for the planned
+  DMR ⨯ DMR-DECREP merge. Runs `--channel-plan` (optionally
+  `--follow-traffic`) live on a real Pi 5 + RSP1B and measures the one
+  thing CI can't: per-process CPU (from `/proc` jiffy deltas, not `ps`
+  lifetime averages), tree RSS, live dsd-fme count, and decoded-event
+  count (sync-lock evidence). Prints a verdict on whether simultaneous
+  multi-channel decode is viable and how many channels hold real-time.
+  Runs on port 8081 to avoid colliding with the DMR web app on 8080.
+  Pure tooling — no product code touched.
+
 ## [0.26.1] — 2026-07-12
 
 ### Fixed
