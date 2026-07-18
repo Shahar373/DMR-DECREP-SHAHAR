@@ -980,6 +980,18 @@ def _migrate_jsonl(args: argparse.Namespace) -> int:
 
 def main(argv: Optional[list[str]] = None) -> None:
     args = _parse_args(argv)
+    if args.serve and args.port == 8080:
+        # 8080 is DMR's dmr-web.service — the always-on production app on the
+        # shared Pi (see the --port help text above and dmr-monitor.service).
+        # A stale systemd unit, a hand-typed --port, or old install docs could
+        # still hand us 8080 by accident; refuse outright instead of quietly
+        # squatting the port DMR depends on (this happened once in practice).
+        print(
+            "# FATAL: --port 8080 is reserved for DMR's dmr-web.service on "
+            "this shared Pi — use the default (8081) or another free port.",
+            file=sys.stderr,
+        )
+        sys.exit(2)
     if args.retention_days > 0 and args.event_retention_hours > 0:
         print(
             "# FATAL: --retention-days and --event-retention-hours are "

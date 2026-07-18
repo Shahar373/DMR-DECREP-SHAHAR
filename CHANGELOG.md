@@ -9,6 +9,22 @@ Versioning follows [Semantic Versioning](https://semver.org/):
 Source of truth: `backend/__init__.py` (`__version__`). The dashboard
 footer shows the running build's version and `/api/version` exposes it.
 
+## [0.26.5] — 2026-07-18
+
+### Fixed
+
+- **`--serve --port 8080` is now refused outright (`FATAL`, exit 2)** instead
+  of silently binding — this collision actually happened in production: on
+  the shared Pi, port 8080 (`DMR`'s always-on `dmr-web.service`) ended up
+  answering with this project's English dashboard instead of DMR's Hebrew
+  one, and had to be recovered by hand (`kill`, then `systemctl disable
+  dmr-monitor`). The 0.26.4 fix only changed the *default* — it didn't stop
+  a stale deployed `dmr-monitor.service` unit (installed before that default
+  changed) or a hand-typed `--port 8080` from still taking the port. This
+  guard is enforced in `backend.cli.main` itself, so it holds regardless of
+  which systemd unit, script, or manual invocation passes the flag — a
+  config-file or unit-file drift can no longer reproduce the incident.
+
 ## [0.26.4] — 2026-07-17
 
 ### Changed

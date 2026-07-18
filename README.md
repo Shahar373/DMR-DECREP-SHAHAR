@@ -114,7 +114,10 @@ dashboard is served at `http://<pi>:8081/`. (This is the same invocation the
 systemd unit in `scripts/dmr-monitor.service` uses.) Port 8081, not 8080:
 this repo is now the reference/engine source for a merge into the `DMR`
 project, whose `dmr-web.service` is the always-on production app on 8080
-when both run on the same Pi.
+when both run on the same Pi. `--serve --port 8080` is refused outright
+(`FATAL`, exit 2) — this isn't just a doc convention, it's enforced in
+`backend.cli.main` so a stale unit file or a typo can't reproduce that
+collision.
 
 To watch state without the dashboard, in another terminal:
 ```bash
